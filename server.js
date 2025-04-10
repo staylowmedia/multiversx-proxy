@@ -5,7 +5,7 @@ const NodeCache = require('node-cache');
 const cors = require('cors');
 
 const app = express();
-const cache = new NodeCache({ stdTTL: 3600 }); // 1 hour cache
+const cache = new NodeCache({ stdTTL: 3600 });
 
 app.use(cors());
 app.use(express.json());
@@ -42,10 +42,8 @@ app.post('/fetch-transactions', async (req, res) => {
     let tokenDecimalsCache = {};
 
     try {
-        // Account check
         await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
 
-        // Transactions
         const pageSize = 500;
         let fromIndex = 0;
         const transactionPromises = [];
@@ -90,52 +88,36 @@ app.post('/fetch-transactions', async (req, res) => {
             }
         }
 
-        // Transfers (SAFE)
-        let transferIndex = 0;
-        const transferPromises = [];
-
-        while (true) {
-            if (transferIndex + pageSize > 10000) {
-                console.log(`🔴 Skipping fetch to avoid API limit: start=${transferIndex}, size=${pageSize}`);
-                break;
-            }
-
-            const transferParams = {
-                from: startTimestamp,
-                to: endTimestamp,
-                size: pageSize,
+        // CHUNKED TOKEN TRANSFERS
+        const chunkSize = 60 * 60 * 24 * 7; // 1 uke i sekunder
+        for (let chunkStart = startTimestamp; chunkStart < endTimestamp; chunkStart += chunkSize) {
+            const chunkEnd = Math.min(chunkStart + chunkSize, endTimestamp);
+            const params = {
+                from: chunkStart,
+                to: chunkEnd,
+                size: 500,
                 order: 'asc',
-                start: transferIndex
+                start: 0
             };
-            const cacheKey = `transfers_${walletAddress}_${transferIndex}_${startTimestamp}_${endTimestamp}`;
-            let transferBatch = cache.get(cacheKey);
+            const cacheKey = `transfers_${walletAddress}_${chunkStart}_${chunkEnd}`;
+            let batch = cache.get(cacheKey);
 
-            if (!transferBatch) {
-                transferPromises.push(
-                    axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, { params: transferParams })
-                        .then(response => {
-                            const data = response.data;
-                            cache.set(cacheKey, data);
-                            return data;
-                        })
-                );
-            } else {
-                transferPromises.push(Promise.resolve(transferBatch));
+            if (!batch) {
+                try {
+                    const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, { params });
+                    batch = response.data;
+                    cache.set(cacheKey, batch);
+                } catch (error) {
+                    console.error(`Transfer fetch failed for chunk ${chunkStart}-${chunkEnd}:`, error.response?.data || error.message);
+                    continue;
+                }
             }
 
-            transferIndex += pageSize;
-
-            if (transferPromises.length >= maxConcurrentRequests) {
-                const results = await Promise.all(transferPromises);
-                results.forEach(batch => {
-                    if (batch && batch.length > 0) {
-                        transfers = transfers.concat(batch);
-                    }
-                });
-                transferPromises.length = 0;
-                if (results.every(b => !b || b.length < pageSize)) break;
-                await delay(500);
+            if (batch && batch.length > 0) {
+                transfers = transfers.concat(batch);
             }
+
+            await delay(500);
         }
 
         const taxRelevantTransactions = allTransactions.filter(tx => {
