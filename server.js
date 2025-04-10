@@ -8,7 +8,10 @@ const PORT = process.env.PORT || 3001;
 
 // Tillat forespørsler fra ditt frontend-domene
 const corsOptions = {
-  origin: ['http://www.multiversxdomain.com'],
+  origin: [
+    'http://www.multiversxdomain.com',
+    'http://multiversxdomain.com'
+  ]
 };
 
 app.use(cors(corsOptions));
