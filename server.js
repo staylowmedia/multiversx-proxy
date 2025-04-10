@@ -90,11 +90,16 @@ app.post('/fetch-transactions', async (req, res) => {
             }
         }
 
-        // Transfers
+        // Transfers (SAFE)
         let transferIndex = 0;
         const transferPromises = [];
 
-        while (transferIndex + pageSize <= 10000) {
+        while (true) {
+            if (transferIndex + pageSize > 10000) {
+                console.log(`🔴 Skipping fetch to avoid API limit: start=${transferIndex}, size=${pageSize}`);
+                break;
+            }
+
             const transferParams = {
                 from: startTimestamp,
                 to: endTimestamp,
