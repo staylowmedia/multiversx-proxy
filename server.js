@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
@@ -6,17 +5,26 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Tillat forespørsler fra ditt frontend-domene
+// Tillat spesifikke domener (legg til flere hvis ønsket)
+const allowedOrigins = [
+  'http://www.multiversxdomain.com',
+  'http://multiversxdomain.com',
+  'http://localhost:5500'
+];
+
 const corsOptions = {
-  origin: [
-    'http://www.multiversxdomain.com',
-    'http://multiversxdomain.com'
-  ]
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log('❌ Blocked by CORS:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  }
 };
 
 app.use(cors(corsOptions));
 
-// Proxy for å hente transaksjoner
 app.get('/api/transactions/:wallet', async (req, res) => {
   const { wallet } = req.params;
   const { from = 0, size = 50 } = req.query;
@@ -27,12 +35,11 @@ app.get('/api/transactions/:wallet', async (req, res) => {
     const data = await response.json();
     res.json(data);
   } catch (err) {
-    console.error('Feil ved henting av transaksjoner:', err);
-    res.status(500).json({ error: 'Failed to fetch transactions' });
+    console.error('❌ Error fetching transactions:', err);
+    res.status(502).json({ error: 'Bad Gateway - Failed to fetch transactions' });
   }
 });
 
-// Proxy for å hente token-informasjon
 app.get('/api/token/:identifier', async (req, res) => {
   const { identifier } = req.params;
   const url = `https://api.multiversx.com/tokens/${identifier}`;
@@ -42,12 +49,11 @@ app.get('/api/token/:identifier', async (req, res) => {
     const data = await response.json();
     res.json(data);
   } catch (err) {
-    console.error('Feil ved henting av token-info:', err);
-    res.status(500).json({ error: 'Failed to fetch token info' });
+    console.error('❌ Error fetching token info:', err);
+    res.status(502).json({ error: 'Bad Gateway - Failed to fetch token info' });
   }
 });
 
-// Start server
 app.listen(PORT, () => {
-  console.log(`Proxy server running on port ${PORT}`);
+  console.log(`✅ Proxy server running on port ${PORT}`);
 });
