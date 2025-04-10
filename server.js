@@ -88,8 +88,7 @@ app.post('/fetch-transactions', async (req, res) => {
             }
         }
 
-        // CHUNKED TOKEN TRANSFERS
-        const chunkSize = 60 * 60 * 24 * 7; // 1 uke i sekunder
+        const chunkSize = 60 * 60 * 24 * 7;
         for (let chunkStart = startTimestamp; chunkStart < endTimestamp; chunkStart += chunkSize) {
             const chunkEnd = Math.min(chunkStart + chunkSize, endTimestamp);
             const params = {
@@ -159,8 +158,10 @@ app.post('/fetch-transactions', async (req, res) => {
             tx.outCurrency = 'EGLD';
 
             const relatedTransfers = transfers.filter(t => t.txHash === tx.txHash);
-            const inTransfer = relatedTransfers.find(t => t.sender === walletAddress);
-            const outTransfer = relatedTransfers.find(t => t.receiver === walletAddress);
+            console.log(`🔍 TX ${tx.txHash} (${tx.function}) has ${relatedTransfers.length} related transfers`);
+
+            const inTransfer = relatedTransfers.find(t => t.receiver === walletAddress);
+            const outTransfer = relatedTransfers.find(t => t.sender === walletAddress);
 
             if (inTransfer) {
                 const decimals = await fetchTokenDecimals(inTransfer.identifier);
@@ -176,9 +177,12 @@ app.post('/fetch-transactions', async (req, res) => {
 
             if (tx.inAmount === '0' && tx.outAmount === '0') {
                 if (BigInt(tx.value || 0) > 0) {
-                    if (['transfer', 'reDelegateRewards', 'claimRewards', 'claim'].includes(tx.function)) {
+                    if (tx.sender === walletAddress) {
                         tx.outAmount = (BigInt(tx.value) / BigInt(10**18)).toString();
                         tx.outCurrency = 'EGLD';
+                    } else if (tx.receiver === walletAddress) {
+                        tx.inAmount = (BigInt(tx.value) / BigInt(10**18)).toString();
+                        tx.inCurrency = 'EGLD';
                     }
                 }
             }
