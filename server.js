@@ -3,61 +3,32 @@ import fetch from 'node-fetch';
 import cors from 'cors';
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 10000;
 
-const allowedOrigins = [
-  'https://www.multiversxdomain.com',
-  'https://multiversxdomain.com',
-  'http://www.multiversxdomain.com',
-  'http://multiversxdomain.com',
-  'http://localhost:5500'
-];
+app.use(cors());
 
-const corsOptions = {
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.warn('❌ Blocked by CORS:', origin);
-      callback(new Error('Not allowed by CORS'));
+app.get('/api/transactions/:address', async (req, res) => {
+  const { address } = req.params;
+  const { size = 50, from = 0 } = req.query;
+
+  const url = `https://api.multiversx.com/accounts/${address}/transactions?size=${size}&from=${from}`;
+
+  try {
+    const response = await fetch(url);
+    const contentType = response.headers.get("content-type");
+
+    // 🔒 Sjekk at vi faktisk får JSON
+    if (!contentType || !contentType.includes("application/json")) {
+      const errorText = await response.text();
+      console.error(`❌ Ikke JSON fra API:\n${errorText}`);
+      return res.status(502).send({ error: "Ugyldig respons fra MultiversX API" });
     }
-  }
-};
 
-app.use(cors(corsOptions));
-
-app.get('/api/transactions/:wallet', async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  const { wallet } = req.params;
-  const { from = 0, size = 50 } = req.query;
-  const url = `https://api.multiversx.com/accounts/${wallet}/transactions?size=${size}&from=${from}`;
-
-  try {
-    const response = await fetch(url);
     const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (err) {
-    console.error('❌ Error fetching transactions:', err);
-    res.status(502)
-       .setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
-       .json({ error: 'Bad Gateway - Failed to fetch transactions' });
-  }
-});
-
-app.get('/api/token/:identifier', async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  const { identifier } = req.params;
-  const url = `https://api.multiversx.com/tokens/${identifier}`;
-
-  try {
-    const response = await fetch(url);
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (err) {
-    console.error('❌ Error fetching token info:', err);
-    res.status(502)
-       .setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
-       .json({ error: 'Bad Gateway - Failed to fetch token info' });
+    res.send(data);
+  } catch (error) {
+    console.error("❌ Error fetching transactions:", error);
+    res.status(500).send({ error: "Feil ved henting av transaksjoner" });
   }
 });
 
