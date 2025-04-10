@@ -9,6 +9,8 @@ const PORT = process.env.PORT || 3001;
 const allowedOrigins = [
   'http://www.multiversxdomain.com',
   'http://multiversxdomain.com',
+  'https://www.multiversxdomain.com',
+  'https://multiversxdomain.com',
   'http://localhost:5500'
 ];
 
