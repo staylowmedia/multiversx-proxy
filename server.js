@@ -175,7 +175,6 @@ app.post('/fetch-transactions', async (req, res) => {
         let identifier = inTransfer.identifier || 'EGLD';
         let value = inTransfer.value;
 
-        // Sjekk om dette er en ESDT-overføring ved å parse data-feltet
         if (inTransfer.data && inTransfer.data.startsWith('RVNEVFRyYW5zZmVy')) {
           const decodedData = decodeBase64ToString(inTransfer.data);
           const parts = decodedData.split('@');
@@ -205,7 +204,6 @@ app.post('/fetch-transactions', async (req, res) => {
         let identifier = outTransfer.identifier || 'EGLD';
         let value = outTransfer.value;
 
-        // Sjekk om dette er en ESDT-overføring ved å parse data-feltet
         if (outTransfer.data && outTransfer.data.startsWith('RVNEVFRyYW5zZmVy')) {
           const decodedData = decodeBase64ToString(outTransfer.data);
           const parts = decodedData.split('@');
@@ -247,36 +245,43 @@ app.post('/fetch-transactions', async (req, res) => {
           if (!scr.data || !scr.data.includes('@')) continue;
           const parts = scr.data.split('@');
           const callType = parts[0].toLowerCase();
+          console.log(`Processing scResult for tx ${tx.txHash}: callType=${callType}`);
 
-          if ((callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') && parts.length >= 3) {
-            const tokenHex = parts[1];
-            const amountHex = parts[2];
-            const token = decodeHexToString(tokenHex);
-            const amount = decodeHexToBigInt(amountHex);
-            const decimals = await fetchTokenDecimals(token);
-            const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-
-            console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, decimals=${decimals}, formattedAmount=${formattedAmount}`);
-            console.log(`Before update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
-
-            // Sjekk om dette er en mottatt transaksjon
-            if (scr.receiver === walletAddress && amount > 0 && formattedAmount !== '0') {
-              if (tx.inAmount === '0') { // Bare oppdater hvis inAmount fortsatt er 0
-                tx.inAmount = formattedAmount;
-                tx.inCurrency = token;
-                console.log(`Updated inAmount to ${tx.inAmount} ${tx.inCurrency}`);
+          if (callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') {
+            try {
+              if (parts.length < 3) {
+                console.log(`Invalid ESDTTransfer data for tx ${tx.txHash}: parts=${parts}`);
+                continue;
               }
-            }
-            // Sjekk om dette er en sendt transaksjon
-            if (scr.sender === walletAddress && amount > 0 && formattedAmount !== '0') {
-              if (tx.outAmount === '0') { // Bare oppdater hvis outAmount fortsatt er 0
-                tx.outAmount = formattedAmount;
-                tx.outCurrency = token;
-                console.log(`Updated outAmount to ${tx.outAmount} ${tx.outCurrency}`);
-              }
-            }
+              const tokenHex = parts[1];
+              const amountHex = parts[2];
+              const token = decodeHexToString(tokenHex);
+              const amount = decodeHexToBigInt(amountHex);
+              const decimals = await fetchTokenDecimals(token);
+              const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
 
-            console.log(`After update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
+              console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, decimals=${decimals}, formattedAmount=${formattedAmount}`);
+              console.log(`Before update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
+
+              if (scr.receiver === walletAddress && amount > 0 && formattedAmount !== '0') {
+                if (tx.inAmount === '0') {
+                  tx.inAmount = formattedAmount;
+                  tx.inCurrency = token;
+                  console.log(`Updated inAmount to ${tx.inAmount} ${tx.inCurrency}`);
+                }
+              }
+              if (scr.sender === walletAddress && amount > 0 && formattedAmount !== '0') {
+                if (tx.outAmount === '0') {
+                  tx.outAmount = formattedAmount;
+                  tx.outCurrency = token;
+                  console.log(`Updated outAmount to ${tx.outAmount} ${tx.outCurrency}`);
+                }
+              }
+
+              console.log(`After update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
+            } catch (error) {
+              console.error(`Error processing ESDTTransfer for tx ${tx.txHash}:`, error.message);
+            }
           } else {
             console.log(`Unknown callType: ${callType} for tx ${tx.txHash}`);
           }
