@@ -154,7 +154,7 @@ app.post('/fetch-transactions', async (req, res) => {
         const scResults = detailed.data.smartContractResults || [];
 
         for (const scr of scResults) {
-          if (!scr.data) continue;
+          if (!scr.data || !scr.data.includes('@')) continue;
 
           try {
             const parts = scr.data.split('@');
