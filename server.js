@@ -84,21 +84,20 @@ app.post('/fetch-transactions', async (req, res) => {
       const chunkEnd = Math.min(ts + 86398, endTimestamp);
       let startIndex = 0;
       while (true) {
-        // Sjekk om startIndex + size overskrider grensen på 10000
         if (startIndex + 500 > 10000) {
           console.log(`Reached MultiversX API limit: startIndex (${startIndex}) + size (500) exceeds 10000`);
           break;
         }
 
-        const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, {
-          params: {
-            from: chunkStart,
-            to: chunkEnd,
-            size: 500,
-            order: 'asc',
-            start: startIndex // Bruk 'start' for paginering, ikke 'from'
-          }
-        });
+        const params = {
+          after: chunkStart, // Endret fra 'from' til 'after'
+          before: chunkEnd,  // Endret fra 'to' til 'before'
+          size: 500,
+          order: 'asc',
+          start: startIndex
+        };
+        console.log(`Sending request for transfers: ${JSON.stringify(params)}`);
+        const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, { params });
         console.log(`🔄 Fetched ${response.data.length} transfers from ${chunkStart}–${chunkEnd} with startIndex ${startIndex}`);
         transfers.push(...response.data);
         await delay(RATE_LIMIT_DELAY);
