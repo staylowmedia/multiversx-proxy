@@ -1,4 +1,4 @@
-// server.js (now handles long date range by splitting into 30-day intervals)
+// server.js with debugging for date chunks and filtering
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -50,8 +50,10 @@ app.post('/fetch-transactions', async (req, res) => {
   let taxRelevantTransactions = [];
 
   try {
+    console.log(`🔍 Checking account: ${walletAddress}`);
     await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
     const dateChunks = splitDateRange(fromDateObj, toDateObj);
+    console.log('📅 Date chunks:', dateChunks.map(pair => pair.map(d => d.toISOString())));
 
     const fetchTokenDecimals = async (tokenIdentifier) => {
       const knownDecimals = { 'EGLD': 18, 'WEGLD-bd4d79': 18, 'MEX-43535633537': 18 };
@@ -68,6 +70,7 @@ app.post('/fetch-transactions', async (req, res) => {
     };
 
     for (const [chunkStart, chunkEnd] of dateChunks) {
+      console.log(`⏱️ Fetching from ${chunkStart.toISOString()} to ${chunkEnd.toISOString()}`);
       const startTimestamp = Math.floor(chunkStart.getTime() / 1000);
       const endTimestamp = Math.floor(chunkEnd.getTime() / 1000);
 
@@ -75,6 +78,7 @@ app.post('/fetch-transactions', async (req, res) => {
         const params = { after: startTimestamp, before: endTimestamp, size: 1000, order: 'asc', from: fromIndex };
         const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
         const batch = response.data;
+        console.log(`📥 Got ${batch.length} tx at index ${fromIndex}`);
         allTransactions.push(...batch);
         await delay(RATE_LIMIT_DELAY);
         if (batch.length < 1000) break;
@@ -87,6 +91,7 @@ app.post('/fetch-transactions', async (req, res) => {
           if (startIndex + 500 > 10000) break;
           const params = { after: ts, before: chunkDayEnd, size: 500, order: 'asc', start: startIndex };
           const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, { params });
+          console.log(`🔁 Transfers ${response.data.length} at start ${startIndex}`);
           transfers.push(...response.data);
           await delay(RATE_LIMIT_DELAY);
           if (response.data.length < 500) break;
@@ -95,19 +100,34 @@ app.post('/fetch-transactions', async (req, res) => {
       }
     }
 
-    // Filtering and processing logic stays the same as in prior version
-    // This includes SCResult parsing and LP logic
-    // ... (left out here to keep update short)
+    console.log('📊 Total transactions:', allTransactions.length);
+    console.log('📦 Total transfers:', transfers.length);
+
+    const taxRelevantFunctions = [
+      'claimrewards', 'claim', 'claimrewardsproxy', 'redelegaterewards',
+      'swaptokensfixedinput', 'swaptokensfixedoutput', 'multipairswap',
+      'transfer', 'wrapegld', 'unwrapegld',
+      'aggregateegld', 'aggregateesdt',
+      'esdttransfer', 'esdtnfttransfer', 'multiesdtnfttransfer',
+      'buy', 'sell', 'withdraw', 'claimlockedassets'
+    ];
+
+    taxRelevantTransactions = allTransactions.filter(tx => {
+      const func = tx.function?.toLowerCase() || '';
+      const hasTransfer = transfers.some(t => t.txHash === tx.txHash);
+      return (hasTransfer || taxRelevantFunctions.includes(func));
+    });
+
+    console.log('✅ Found tax-relevant:', taxRelevantTransactions.length);
 
     res.json({ allTransactions, taxRelevantTransactions });
-
   } catch (error) {
-    console.error('Error in fetch-transactions:', error);
+    console.error('❌ Error in fetch-transactions:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Proxy server running on port ${PORT}`);
+  console.log(`🚀 Proxy server running on port ${PORT}`);
 });
