@@ -1,4 +1,4 @@
-// server.js (fix to combine in/out on same line if same tx)
+// server.js (claimRewards: separate lines for ESDT and LP-token)
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -100,57 +100,111 @@ app.post('/fetch-transactions', async (req, res) => {
       const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
       const scResults = detailed.data.results || [];
 
-      const baseTx = {
-        timestamp: tx.timestamp,
-        function: tx.function || 'N/A',
-        txHash: tx.txHash,
-        fee: tx.fee || '0',
-        inAmount: '0',
-        inCurrency: 'EGLD',
-        outAmount: '0',
-        outCurrency: 'EGLD'
-      };
+      if (func === 'claimrewards') {
+        for (const scr of scResults) {
+          if (!scr.data) continue;
+          const decodedData = decodeBase64ToString(scr.data);
+          if (!decodedData.includes('@')) continue;
+          const parts = decodedData.split('@');
 
-      for (const scr of scResults) {
-        if (!scr.data) continue;
-        const decodedData = decodeBase64ToString(scr.data);
-        if (!decodedData.includes('@')) continue;
+          if ((parts[0].toLowerCase() === 'esdttransfer' || parts[0].toLowerCase() === 'esdtnfttransfer') && parts.length >= 3) {
+            try {
+              const token = decodeHexToString(parts[1]);
+              const amountHex = parts[3] || parts[2];
+              const amount = decodeHexToBigInt(amountHex);
+              const decimals = await fetchTokenDecimals(token);
+              const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+              const isReceiver = scr.receiver?.toLowerCase() === walletAddress.toLowerCase();
+              const isSender = scr.sender?.toLowerCase() === walletAddress.toLowerCase();
 
-        const parts = decodedData.split('@');
-        const callType = parts[0].toLowerCase();
-        if ((callType === 'esdttransfer' || callType === 'esdtnfttransfer' || callType === 'multiesdtnfttransfer') && parts.length >= 3) {
-          try {
-            const token = decodeHexToString(parts[1]);
-            const amountHex = parts[3] || parts[2];
-            const amount = decodeHexToBigInt(amountHex);
-            const decimals = await fetchTokenDecimals(token);
-            const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-
-            const isReceiver = (scr.receiver?.toLowerCase() === walletAddress.toLowerCase()) ||
-                               (scr.originalReceiver?.toLowerCase() === walletAddress.toLowerCase());
-
-            if (isReceiver && formattedAmount !== '0') {
-              baseTx.inAmount = formattedAmount;
-              baseTx.inCurrency = token;
+              if (isReceiver) {
+                taxRelevantTransactions.push({
+                  timestamp: tx.timestamp,
+                  function: 'claimRewards',
+                  txHash: tx.txHash,
+                  fee: tx.fee || '0',
+                  inAmount: formattedAmount,
+                  inCurrency: token,
+                  outAmount: '0',
+                  outCurrency: 'EGLD'
+                });
+              }
+              if (isSender) {
+                taxRelevantTransactions.push({
+                  timestamp: tx.timestamp,
+                  function: 'claimRewards - out',
+                  txHash: tx.txHash,
+                  fee: tx.fee || '0',
+                  inAmount: '0',
+                  inCurrency: 'EGLD',
+                  outAmount: formattedAmount,
+                  outCurrency: token
+                });
+                taxRelevantTransactions.push({
+                  timestamp: tx.timestamp,
+                  function: 'claimRewards - in',
+                  txHash: tx.txHash,
+                  fee: tx.fee || '0',
+                  inAmount: formattedAmount,
+                  inCurrency: token,
+                  outAmount: '0',
+                  outCurrency: 'EGLD'
+                });
+              }
+            } catch (err) {
+              console.warn(`Failed to parse smart contract result: ${err.message}`);
             }
-            if (scr.sender === walletAddress && formattedAmount !== '0') {
-              baseTx.outAmount = formattedAmount;
-              baseTx.outCurrency = token;
-            }
-          } catch (err) {
-            console.warn(`Failed to parse smart contract result: ${err.message}`);
           }
         }
-      }
+      } else {
+        const baseTx = {
+          timestamp: tx.timestamp,
+          function: tx.function || 'N/A',
+          txHash: tx.txHash,
+          fee: tx.fee || '0',
+          inAmount: '0',
+          inCurrency: 'EGLD',
+          outAmount: '0',
+          outCurrency: 'EGLD'
+        };
 
-      // wrap EGLD fallback
-      if (tx.value && tx.value !== '0' && baseTx.outAmount === '0') {
-        const formattedEgld = new BigNumber(tx.value.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed(18);
-        baseTx.outAmount = formattedEgld;
-        baseTx.outCurrency = 'EGLD';
-      }
+        for (const scr of scResults) {
+          if (!scr.data) continue;
+          const decodedData = decodeBase64ToString(scr.data);
+          if (!decodedData.includes('@')) continue;
+          const parts = decodedData.split('@');
 
-      taxRelevantTransactions.push(baseTx);
+          if ((parts[0].toLowerCase() === 'esdttransfer' || parts[0].toLowerCase() === 'esdtnfttransfer') && parts.length >= 3) {
+            try {
+              const token = decodeHexToString(parts[1]);
+              const amountHex = parts[3] || parts[2];
+              const amount = decodeHexToBigInt(amountHex);
+              const decimals = await fetchTokenDecimals(token);
+              const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+
+              const isReceiver = scr.receiver?.toLowerCase() === walletAddress.toLowerCase();
+              const isSender = scr.sender?.toLowerCase() === walletAddress.toLowerCase();
+
+              if (isReceiver && formattedAmount !== '0') {
+                baseTx.inAmount = formattedAmount;
+                baseTx.inCurrency = token;
+              }
+              if (isSender && formattedAmount !== '0') {
+                baseTx.outAmount = formattedAmount;
+                baseTx.outCurrency = token;
+              }
+            } catch {}
+          }
+        }
+
+        if (tx.value && tx.value !== '0' && baseTx.outAmount === '0') {
+          const formattedEgld = new BigNumber(tx.value.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed(18);
+          baseTx.outAmount = formattedEgld;
+          baseTx.outCurrency = 'EGLD';
+        }
+
+        taxRelevantTransactions.push(baseTx);
+      }
     }
 
     res.json({ allTransactions, taxRelevantTransactions });
