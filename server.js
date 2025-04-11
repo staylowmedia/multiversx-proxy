@@ -118,6 +118,13 @@ app.post('/fetch-transactions', async (req, res) => {
           const decodedData = decodeBase64ToString(scr.data);
           if (!decodedData.includes('@')) continue;
 
+          console.log('--- SCResult ---');
+          console.log('tx:', tx.txHash);
+          console.log('scr.receiver:', scr.receiver);
+          console.log('scr.originalReceiver:', scr.originalReceiver);
+          console.log('decodedData:', decodedData);
+          console.log('walletAddress:', walletAddress);
+
           const parts = decodedData.split('@');
           const callType = parts[0].toLowerCase();
 
