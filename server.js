@@ -1,4 +1,4 @@
-// server.js (claimRewards: separate lines for ESDT and LP-token)
+// server.js (fixed LP token dual-line logic)
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -101,6 +101,8 @@ app.post('/fetch-transactions', async (req, res) => {
       const scResults = detailed.data.results || [];
 
       if (func === 'claimrewards') {
+        const tokensFound = {};
+
         for (const scr of scResults) {
           if (!scr.data) continue;
           const decodedData = decodeBase64ToString(scr.data);
@@ -114,35 +116,20 @@ app.post('/fetch-transactions', async (req, res) => {
               const amount = decodeHexToBigInt(amountHex);
               const decimals = await fetchTokenDecimals(token);
               const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+
               const isReceiver = scr.receiver?.toLowerCase() === walletAddress.toLowerCase();
               const isSender = scr.sender?.toLowerCase() === walletAddress.toLowerCase();
 
-              if (isReceiver) {
+              const isLP = token.includes('FL') || token.includes('LP');
+              const key = `${token}-${scr.txHash}`;
+
+              if (!tokensFound[key]) tokensFound[key] = { in: null, out: null };
+              if (isReceiver) tokensFound[key].in = formattedAmount;
+              if (isSender) tokensFound[key].out = formattedAmount;
+              if (!isLP && isReceiver) {
                 taxRelevantTransactions.push({
                   timestamp: tx.timestamp,
                   function: 'claimRewards',
-                  txHash: tx.txHash,
-                  fee: tx.fee || '0',
-                  inAmount: formattedAmount,
-                  inCurrency: token,
-                  outAmount: '0',
-                  outCurrency: 'EGLD'
-                });
-              }
-              if (isSender) {
-                taxRelevantTransactions.push({
-                  timestamp: tx.timestamp,
-                  function: 'claimRewards - out',
-                  txHash: tx.txHash,
-                  fee: tx.fee || '0',
-                  inAmount: '0',
-                  inCurrency: 'EGLD',
-                  outAmount: formattedAmount,
-                  outCurrency: token
-                });
-                taxRelevantTransactions.push({
-                  timestamp: tx.timestamp,
-                  function: 'claimRewards - in',
                   txHash: tx.txHash,
                   fee: tx.fee || '0',
                   inAmount: formattedAmount,
@@ -156,6 +143,34 @@ app.post('/fetch-transactions', async (req, res) => {
             }
           }
         }
+
+        for (const key in tokensFound) {
+          const [token] = key.split('-');
+          const entry = tokensFound[key];
+          if ((token.includes('FL') || token.includes('LP')) && entry.in && entry.out) {
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: 'claimRewards - out',
+              txHash: tx.txHash,
+              fee: tx.fee || '0',
+              inAmount: '0',
+              inCurrency: 'EGLD',
+              outAmount: entry.out,
+              outCurrency: token
+            });
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: 'claimRewards - in',
+              txHash: tx.txHash,
+              fee: tx.fee || '0',
+              inAmount: entry.in,
+              inCurrency: token,
+              outAmount: '0',
+              outCurrency: 'EGLD'
+            });
+          }
+        }
+
       } else {
         const baseTx = {
           timestamp: tx.timestamp,
