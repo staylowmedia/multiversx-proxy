@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
 const cors = require('cors');
+const BigNumber = require('bignumber.js');
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 3600 });
@@ -57,9 +58,9 @@ app.post('/fetch-transactions', async (req, res) => {
     console.log(`📡 Verifying account ${walletAddress}`);
     await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
 
-    const pageSize = 500;
-
-    for (let fromIndex = 0; fromIndex < 5000; fromIndex += pageSize) {
+    // Hent transaksjoner
+    const pageSize = 1000;
+    for (let fromIndex = 0; fromIndex < 10000; fromIndex += pageSize) {
       const params = {
         after: startTimestamp,
         before: endTimestamp,
@@ -69,34 +70,37 @@ app.post('/fetch-transactions', async (req, res) => {
       };
       const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
       const batch = response.data;
-      if (batch.length === 0) break;
       console.log(`📥 Fetched ${batch.length} transactions from index ${fromIndex}`);
       allTransactions.push(...batch);
       await delay(RATE_LIMIT_DELAY);
       if (batch.length < pageSize) break;
     }
+    console.log(`Total transactions fetched: ${allTransactions.length}`);
 
+    // Hent transfers
     const SECONDS_IN_DAY = 86400;
     for (let ts = startTimestamp; ts < endTimestamp; ts += SECONDS_IN_DAY) {
       const chunkStart = ts;
       const chunkEnd = Math.min(ts + 86398, endTimestamp);
-      try {
+      let fromIndex = 0;
+      while (true) {
         const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, {
           params: {
             from: chunkStart,
             to: chunkEnd,
             size: 500,
             order: 'asc',
-            start: 0
+            from: fromIndex
           }
         });
         console.log(`🔄 Fetched ${response.data.length} transfers from ${chunkStart}–${chunkEnd}`);
         transfers.push(...response.data);
         await delay(RATE_LIMIT_DELAY);
-      } catch (error) {
-        console.warn(`⚠️ Transfer fetch failed for chunk ${chunkStart}-${chunkEnd}:`, error.response?.data || error.message);
+        if (response.data.length < 500) break;
+        fromIndex += 500;
       }
     }
+    console.log(`Total transfers fetched: ${transfers.length}`);
 
     const taxRelevantFunctions = [
       'claimrewards', 'claim', 'claimrewardsproxy', 'redelegaterewards',
@@ -109,15 +113,14 @@ app.post('/fetch-transactions', async (req, res) => {
 
     const taxRelevantTransactions = allTransactions.filter(tx => {
       const func = tx.function?.toLowerCase() || '';
-      const hasValue = tx.value && BigInt(tx.value) > 0;
       const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
-      return withinDate && (hasValue || taxRelevantFunctions.includes(func));
+      const hasTransfer = transfers.some(t => t.txHash === tx.txHash);
+      return withinDate && (hasTransfer || taxRelevantFunctions.includes(func));
     });
 
     const fetchTokenDecimals = async (tokenIdentifier) => {
       if (tokenIdentifier === 'EGLD') return 18;
       if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
-
       try {
         const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
         const decimals = response.data.decimals || 18;
@@ -135,18 +138,19 @@ app.post('/fetch-transactions', async (req, res) => {
       tx.outCurrency = 'EGLD';
 
       const related = transfers.filter(t => t.txHash === tx.txHash);
+      console.log(`Found ${related.length} transfers for tx ${tx.txHash}`);
       const inTransfer = related.find(t => t.receiver === walletAddress);
       const outTransfer = related.find(t => t.sender === walletAddress);
 
       if (inTransfer?.identifier && inTransfer.value) {
         const decimals = await fetchTokenDecimals(inTransfer.identifier);
-        tx.inAmount = (BigInt(inTransfer.value) / BigInt(10 ** decimals)).toString();
+        tx.inAmount = new BigNumber(inTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
         tx.inCurrency = inTransfer.identifier;
       }
 
       if (outTransfer?.identifier && outTransfer.value) {
         const decimals = await fetchTokenDecimals(outTransfer.identifier);
-        tx.outAmount = (BigInt(outTransfer.value) / BigInt(10 ** decimals)).toString();
+        tx.outAmount = new BigNumber(outTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
         tx.outCurrency = outTransfer.identifier;
       }
 
@@ -156,31 +160,27 @@ app.post('/fetch-transactions', async (req, res) => {
 
         for (const scr of scResults) {
           if (!scr.data || !scr.data.includes('@')) continue;
-
           const parts = scr.data.split('@');
           const callType = parts[0].toLowerCase();
 
-          try {
-            if ((callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') && parts.length >= 3) {
-              const tokenHex = parts[1];
-              const amountHex = parts[2];
-              const token = decodeHexToString(tokenHex);
-              const amount = decodeHexToBigInt(amountHex);
-              const decimals = await fetchTokenDecimals(token);
+          if ((callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') && parts.length >= 3) {
+            const tokenHex = parts[1];
+            const amountHex = parts[2];
+            const token = decodeHexToString(tokenHex);
+            const amount = decodeHexToBigInt(amountHex);
+            const decimals = await fetchTokenDecimals(token);
+            const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
 
-              const formattedAmount = (amount / BigInt(10 ** decimals)).toString();
-
-              if (scr.receiver === walletAddress || scr.originalTxHash === tx.txHash) {
-                tx.inAmount = formattedAmount;
-                tx.inCurrency = token;
-              }
-              if (scr.sender === walletAddress || scr.originalTxHash === tx.txHash) {
-                tx.outAmount = formattedAmount;
-                tx.outCurrency = token;
-              }
+            if ((scr.receiver === walletAddress || scr.originalTxHash === tx.txHash) && (!tx.inAmount || tx.inAmount === '0')) {
+              tx.inAmount = formattedAmount;
+              tx.inCurrency = token;
             }
-          } catch (decodeError) {
-            console.warn(`⚠️ Failed to decode smart contract result for ${tx.txHash}:`, decodeError.message);
+            if ((scr.sender === walletAddress || scr.originalTxHash === tx.txHash) && (!tx.outAmount || tx.outAmount === '0')) {
+              tx.outAmount = formattedAmount;
+              tx.outCurrency = token;
+            }
+          } else {
+            console.log(`Unknown callType: ${callType} for tx ${tx.txHash}`);
           }
         }
       } catch (error) {
