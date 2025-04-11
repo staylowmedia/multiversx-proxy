@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -127,7 +128,9 @@ app.post('/fetch-transactions', async (req, res) => {
               const decimals = await fetchTokenDecimals(token);
               const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
 
-              const isReceiver = scr.receiver === walletAddress || scr.originalReceiver === walletAddress;
+              const isReceiver = (scr.receiver?.toLowerCase() === walletAddress.toLowerCase()) ||
+                                 (scr.originalReceiver?.toLowerCase() === walletAddress.toLowerCase()) ||
+                                 (decodedData.startsWith('ESDTTransfer') && detailed.data.receiver === walletAddress);
 
               if (isReceiver && formattedAmount !== '0') {
                 if (tx.inCurrency === 'EGLD' || tx.inAmount === '0') {
