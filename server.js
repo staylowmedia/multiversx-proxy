@@ -191,9 +191,12 @@ app.post('/fetch-transactions', async (req, res) => {
         if (value && value !== '0') {
           const decimals = await fetchTokenDecimals(identifier);
           console.log(`Calculating inAmount: value=${value}, decimals=${decimals}, identifier=${identifier}`);
-          tx.inAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-          console.log(`Formatted inAmount: ${tx.inAmount}`);
-          tx.inCurrency = identifier;
+          const formattedAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+          console.log(`Formatted inAmount: ${formattedAmount}`);
+          if (formattedAmount !== '0') {
+            tx.inAmount = formattedAmount;
+            tx.inCurrency = identifier;
+          }
         }
       }
 
@@ -218,9 +221,12 @@ app.post('/fetch-transactions', async (req, res) => {
         if (value && value !== '0') {
           const decimals = await fetchTokenDecimals(identifier);
           console.log(`Calculating outAmount: value=${value}, decimals=${decimals}, identifier=${identifier}`);
-          tx.outAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-          console.log(`Formatted outAmount: ${tx.outAmount}`);
-          tx.outCurrency = identifier;
+          const formattedAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+          console.log(`Formatted outAmount: ${formattedAmount}`);
+          if (formattedAmount !== '0') {
+            tx.outAmount = formattedAmount;
+            tx.outCurrency = identifier;
+          }
         }
       }
 
@@ -243,18 +249,27 @@ app.post('/fetch-transactions', async (req, res) => {
             const decimals = await fetchTokenDecimals(token);
             const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
 
-            console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, formattedAmount=${formattedAmount}`);
+            console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, decimals=${decimals}, formattedAmount=${formattedAmount}`);
+            console.log(`Before update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
 
             // Sjekk om dette er en mottatt transaksjon
             if (scr.receiver === walletAddress && amount > 0 && formattedAmount !== '0') {
-              tx.inAmount = formattedAmount;
-              tx.inCurrency = token;
+              if (tx.inAmount === '0') { // Bare oppdater hvis inAmount fortsatt er 0
+                tx.inAmount = formattedAmount;
+                tx.inCurrency = token;
+                console.log(`Updated inAmount to ${tx.inAmount} ${tx.inCurrency}`);
+              }
             }
             // Sjekk om dette er en sendt transaksjon
             if (scr.sender === walletAddress && amount > 0 && formattedAmount !== '0') {
-              tx.outAmount = formattedAmount;
-              tx.outCurrency = token;
+              if (tx.outAmount === '0') { // Bare oppdater hvis outAmount fortsatt er 0
+                tx.outAmount = formattedAmount;
+                tx.outCurrency = token;
+                console.log(`Updated outAmount to ${tx.outAmount} ${tx.outCurrency}`);
+              }
             }
+
+            console.log(`After update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
           } else {
             console.log(`Unknown callType: ${callType} for tx ${tx.txHash}`);
           }
