@@ -74,17 +74,13 @@ app.post('/fetch-transactions', async (req, res) => {
             throw new Error(`Failed to verify account: ${error.response?.data?.message || error.message}`);
         }
 
-        // Hent transaksjoner parallelt
-        const pageSize = 500; // Redusert fra 1000 til 500
+        // Hent transaksjoner
         let fromIndex = 0;
-        const transactionPromises = [];
-        const maxConcurrentRequests = 3; // Maks 3 kall samtidig
-
         while (true) {
             const params = {
                 after: startTimestamp,
                 before: endTimestamp,
-                size: pageSize,
+                size: 1000,
                 order: 'asc',
                 from: fromIndex
             };
@@ -92,97 +88,66 @@ app.post('/fetch-transactions', async (req, res) => {
             let transactions = cache.get(cacheKey);
 
             if (!transactions) {
-                console.log(`Queueing transaction fetch from index ${fromIndex} for ${walletAddress} with params:`, params);
+                console.log(`Fetching transactions from index ${fromIndex} for ${walletAddress} with params:`, params);
                 const url = `https://api.multiversx.com/accounts/${walletAddress}/transactions`;
                 console.log(`Request URL: ${url}?${new URLSearchParams(params).toString()}`);
-                transactionPromises.push(
-                    axios.get(url, { params })
-                        .then(response => {
-                            const data = response.data;
-                            cache.set(cacheKey, data);
-                            return data;
-                        })
-                        .catch(error => {
-                            console.error(`Error fetching transactions for ${walletAddress} at index ${fromIndex}:`, {
-                                status: error.response?.status,
-                                data: error.response?.data,
-                                message: error.message
-                            });
-                            throw new Error(`Failed to fetch transactions: ${error.response?.data?.message || error.message}`);
-                        })
-                );
-            } else {
-                transactionPromises.push(Promise.resolve(transactions));
+                try {
+                    const response = await axios.get(url, { params });
+                    transactions = response.data;
+                    cache.set(cacheKey, transactions);
+                } catch (error) {
+                    console.error(`Error fetching transactions for ${walletAddress}:`, {
+                        status: error.response?.status,
+                        data: error.response?.data,
+                        message: error.message
+                    });
+                    throw new Error(`Failed to fetch transactions: ${error.response?.data?.message || error.message}`);
+                }
             }
 
-            fromIndex += pageSize;
+            if (!transactions || transactions.length === 0) break;
 
-            // Begrens antall samtidige kall
-            if (transactionPromises.length >= maxConcurrentRequests || fromIndex >= 8520) { // Basert på nonce
-                const results = await Promise.all(transactionPromises);
-                results.forEach(transactions => {
-                    if (transactions && transactions.length > 0) {
-                        allTransactions = allTransactions.concat(transactions);
-                    }
-                });
-                transactionPromises.length = 0; // Tøm arrayen
-                if (results.every(transactions => !transactions || transactions.length < pageSize)) break;
-                await delay(500); // Redusert fra 1000 til 500 ms
-            }
+            allTransactions = allTransactions.concat(transactions);
+            fromIndex += transactions.length;
+            await delay(1000); // Forsinkelse for å unngå rate limiting
         }
 
-        // Hent token-overføringer parallelt
+        // Hent token-overføringer
         let transferIndex = 0;
-        const transferPromises = [];
-
         while (true) {
             const transferParams = {
-                from: startTimestamp,
-                to: endTimestamp,
-                size: pageSize,
+                from: startTimestamp,  // Tidsstempel for start
+                to: endTimestamp,      // Tidsstempel for slutt
+                size: 1000,
                 order: 'asc',
-                start: transferIndex
+                start: transferIndex   // Paginering (erstattet duplikat 'from')
             };
             const cacheKey = `transfers_${walletAddress}_${transferIndex}_${startTimestamp}_${endTimestamp}`;
             let transferBatch = cache.get(cacheKey);
 
             if (!transferBatch) {
-                console.log(`Queueing token transfers fetch from index ${transferIndex} for ${walletAddress} with params:`, transferParams);
+                console.log(`Fetching token transfers from index ${transferIndex} for ${walletAddress} with params:`, transferParams);
                 const url = `https://api.multiversx.com/accounts/${walletAddress}/transfers`;
                 console.log(`Request URL: ${url}?${new URLSearchParams(transferParams).toString()}`);
-                transferPromises.push(
-                    axios.get(url, { params: transferParams })
-                        .then(response => {
-                            const data = response.data;
-                            cache.set(cacheKey, data);
-                            return data;
-                        })
-                        .catch(error => {
-                            console.error(`Error fetching token transfers for ${walletAddress} at index ${transferIndex}:`, {
-                                status: error.response?.status,
-                                data: error.response?.data,
-                                message: error.message
-                            });
-                            throw new Error(`Failed to fetch token transfers: ${error.response?.data?.message || error.message}`);
-                        })
-                );
-            } else {
-                transferPromises.push(Promise.resolve(transferBatch));
+                try {
+                    const response = await axios.get(url, { params: transferParams });
+                    transferBatch = response.data;
+                    cache.set(cacheKey, transferBatch);
+                } catch (error) {
+                    console.error(`Error fetching token transfers for ${walletAddress}:`, {
+                        status: error.response?.status,
+                        data: error.response?.data,
+                        message: error.message
+                    });
+                    throw new Error(`Failed to fetch token transfers: ${error.response?.data?.message || error.message}`);
+                }
             }
 
-            transferIndex += pageSize;
+            if (!transferBatch || transferBatch.length === 0) break;
 
-            if (transferPromises.length >= maxConcurrentRequests) {
-                const results = await Promise.all(transferPromises);
-                results.forEach(batch => {
-                    if (batch && batch.length > 0) {
-                        transfers = transfers.concat(batch);
-                    }
-                });
-                transferPromises.length = 0; // Tøm arrayen
-                if (results.every(batch => !batch || batch.length < pageSize)) break;
-                await delay(500); // Redusert til 500 ms
-            }
+            transfers = transfers.concat(transferBatch);
+            transferIndex += transferBatch.length;
+            await delay(1000); // Forsinkelse for å unngå rate limiting
         }
 
         // Filtrer skattepliktige transaksjoner
