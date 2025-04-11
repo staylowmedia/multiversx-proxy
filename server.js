@@ -1,173 +1,168 @@
-<script>
-    window.addEventListener('DOMContentLoaded', () => {
-        document.getElementById('fromDate').value = '2024-01-01';
-        document.getElementById('toDate').value = '2024-12-31';
+const express = require('express');
+const axios = require('axios');
+const NodeCache = require('node-cache');
+const cors = require('cors');
+
+const app = express();
+const cache = new NodeCache({ stdTTL: 3600 });
+
+app.use(cors());
+app.use(express.json());
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const RATE_LIMIT_DELAY = 500;
+
+const validateWalletAddress = (address) => {
+  const addressPattern = /^erd1[0-9a-z]{58}$/;
+  return addressPattern.test(address);
+};
+
+app.post('/fetch-transactions', async (req, res) => {
+  const { walletAddress, fromDate, toDate } = req.body;
+
+  if (!walletAddress || !fromDate || !toDate) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+
+  if (!validateWalletAddress(walletAddress)) {
+    return res.status(400).json({ error: 'Invalid wallet address' });
+  }
+
+  const fromDateObj = new Date(fromDate);
+  const toDateObj = new Date(toDate);
+  const startTimestamp = Math.floor(fromDateObj.getTime() / 1000);
+  const endTimestamp = Math.floor(toDateObj.getTime() / 1000);
+
+  if (isNaN(startTimestamp) || isNaN(endTimestamp)) {
+    return res.status(400).json({ error: 'Invalid timestamps' });
+  }
+
+  if (fromDateObj > toDateObj) {
+    return res.status(400).json({ error: 'Invalid date range' });
+  }
+
+  let allTransactions = [];
+  let transfers = [];
+  let tokenDecimalsCache = {};
+
+  try {
+    console.log(`📡 Verifying account ${walletAddress}`);
+    await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
+
+    const pageSize = 500;
+
+    // Fetch transactions
+    for (let fromIndex = 0; fromIndex < 5000; fromIndex += pageSize) {
+      const params = {
+        after: startTimestamp,
+        before: endTimestamp,
+        size: pageSize,
+        order: 'asc',
+        from: fromIndex
+      };
+      const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
+      const batch = response.data;
+      if (batch.length === 0) break;
+      console.log(`📥 Fetched ${batch.length} transactions from index ${fromIndex}`);
+      allTransactions.push(...batch);
+      await delay(RATE_LIMIT_DELAY);
+      if (batch.length < pageSize) break;
+    }
+
+    // Fetch token transfers in daily chunks
+    const SECONDS_IN_DAY = 86400;
+    for (let ts = startTimestamp; ts < endTimestamp; ts += SECONDS_IN_DAY) {
+      const chunkStart = ts;
+      const chunkEnd = Math.min(ts + SECONDS_IN_DAY - 1, endTimestamp);
+      try {
+        const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, {
+          params: {
+            from: chunkStart,
+            to: chunkEnd,
+            size: 500,
+            order: 'asc'
+          }
+        });
+        console.log(`🔄 Fetched ${response.data.length} transfers from ${chunkStart}–${chunkEnd}`);
+        transfers.push(...response.data);
+        await delay(RATE_LIMIT_DELAY);
+      } catch (error) {
+        console.warn(`⚠️ Transfer fetch failed for chunk ${chunkStart}-${chunkEnd}:`, error.response?.data || error.message);
+      }
+    }
+
+    const taxRelevantFunctions = [
+      'claimrewards', 'claim', 'claimrewardsproxy', 'redelegaterewards',
+      'swaptokensfixedinput', 'swaptokensfixedoutput', 'multipairswap',
+      'transfer', 'wrapegld', 'unwrapegld',
+      'aggregateegld', 'aggregateesdt',
+      'esdttransfer', 'esdtnfttransfer', 'multiesdtnfttransfer',
+      'buy', 'sell', 'withdraw', 'claimlockedassets'
+    ];
+
+    const taxRelevantTransactions = allTransactions.filter(tx => {
+      const func = tx.function?.toLowerCase() || '';
+      const hasValue = tx.value && BigInt(tx.value) > 0;
+      const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
+      return withinDate && (hasValue || taxRelevantFunctions.includes(func));
     });
 
-    let allTransactions = [];
-    let taxRelevantTransactions = [];
-    let currentPage = 1;
-    const transactionsPerPage = 25;
+    const fetchTokenDecimals = async (tokenIdentifier) => {
+      if (tokenIdentifier === 'EGLD') return 18;
+      if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
 
-    document.getElementById('transactionForm').addEventListener('submit', async (event) => {
-        event.preventDefault();
+      try {
+        const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
+        const decimals = response.data.decimals || 18;
+        tokenDecimalsCache[tokenIdentifier] = decimals;
+        return decimals;
+      } catch {
+        return 18;
+      }
+    };
 
-        const walletAddress = document.getElementById('walletAddress').value.trim();
-        const fromDateInput = document.getElementById('fromDate').value;
-        const toDateInput = document.getElementById('toDate').value;
-        const errorDiv = document.getElementById('error');
-        const loadingDiv = document.getElementById('loading');
-        const progressDiv = document.getElementById('progress');
-        const resultsDiv = document.getElementById('results');
-        const downloadOptionsDiv = document.getElementById('downloadOptions');
-        const button = event.submitter;
+    for (let tx of taxRelevantTransactions) {
+      tx.inAmount = '0';
+      tx.inCurrency = 'EGLD';
+      tx.outAmount = '0';
+      tx.outCurrency = 'EGLD';
 
-        button.disabled = true;
-        errorDiv.style.display = 'none';
-        loadingDiv.style.display = 'block';
-        progressDiv.style.display = 'block';
-        resultsDiv.style.display = 'none';
-        downloadOptionsDiv.style.display = 'none';
+      const related = transfers.filter(t => t.txHash === tx.txHash);
+      const inTransfer = related.find(t => t.receiver === walletAddress);
+      const outTransfer = related.find(t => t.sender === walletAddress);
 
-        // Inputvalidering
-        if (!walletAddress.startsWith('erd1') || walletAddress.length !== 62) {
-            errorDiv.textContent = 'Please enter a valid MultiversX wallet address.';
-            errorDiv.style.display = 'block';
-            loadingDiv.style.display = 'none';
-            progressDiv.style.display = 'none';
-            button.disabled = false;
-            return;
+      if (inTransfer) {
+        const decimals = await fetchTokenDecimals(inTransfer.identifier);
+        tx.inAmount = (BigInt(inTransfer.value) / BigInt(10 ** decimals)).toString();
+        tx.inCurrency = inTransfer.identifier;
+      }
+
+      if (outTransfer) {
+        const decimals = await fetchTokenDecimals(outTransfer.identifier);
+        tx.outAmount = (BigInt(outTransfer.value) / BigInt(10 ** decimals)).toString();
+        tx.outCurrency = outTransfer.identifier;
+      }
+
+      if (tx.inAmount === '0' && tx.outAmount === '0') {
+        if (BigInt(tx.value || 0) > 0) {
+          if (tx.sender === walletAddress) {
+            tx.outAmount = (BigInt(tx.value) / BigInt(10 ** 18)).toString();
+          } else if (tx.receiver === walletAddress) {
+            tx.inAmount = (BigInt(tx.value) / BigInt(10 ** 18)).toString();
+          }
         }
-
-        try {
-            progressDiv.textContent = '🚀 Connecting to proxy...';
-
-            const response = await fetch('https://multiversx-proxy.onrender.com/fetch-transactions', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    walletAddress,
-                    fromDate: new Date(fromDateInput).toISOString(),
-                    toDate: new Date(toDateInput).toISOString()
-                })
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Unknown error from proxy.');
-            }
-
-            const data = await response.json();
-            allTransactions = data.allTransactions;
-            taxRelevantTransactions = data.taxRelevantTransactions;
-
-            if (taxRelevantTransactions.length === 0) {
-                errorDiv.textContent = 'No tax-relevant transactions found for the selected period.';
-                errorDiv.style.display = 'block';
-                loadingDiv.style.display = 'none';
-                progressDiv.style.display = 'none';
-                button.disabled = false;
-                return;
-            }
-
-            document.getElementById('summary').innerHTML = `
-                <p><strong>Total tax-relevant transactions:</strong> ${taxRelevantTransactions.length}</p>
-                <p><strong>Total all transactions:</strong> ${allTransactions.length}</p>
-            `;
-
-            currentPage = 1;
-            renderPage();
-            resultsDiv.style.display = 'block';
-            downloadOptionsDiv.style.display = 'block';
-
-        } catch (error) {
-            errorDiv.textContent = 'Error: ' + error.message;
-            errorDiv.style.display = 'block';
-        } finally {
-            loadingDiv.style.display = 'none';
-            progressDiv.style.display = 'none';
-            button.disabled = false;
-        }
-    });
-
-    function renderPage() {
-        const startIndex = (currentPage - 1) * transactionsPerPage;
-        const endIndex = startIndex + transactionsPerPage;
-        const pageTransactions = taxRelevantTransactions.slice(startIndex, endIndex);
-
-        const tableBody = document.getElementById('taxTableBody');
-        tableBody.innerHTML = '';
-        pageTransactions.forEach(tx => {
-            const row = document.createElement('tr');
-            const feeAmount = (BigInt(tx.fee || 0) / BigInt(10**18)).toString();
-            row.innerHTML = `
-                <td>${new Date(tx.timestamp * 1000).toISOString()}</td>
-                <td>${tx.function || 'N/A'}</td>
-                <td>${tx.inAmount}</td>
-                <td>${tx.inCurrency}</td>
-                <td>${tx.outAmount}</td>
-                <td>${tx.outCurrency}</td>
-                <td>${feeAmount}</td>
-                <td>EGLD</td>
-                <td class="txhash-col">${tx.txHash}</td>
-            `;
-            tableBody.appendChild(row);
-        });
-
-        const totalPages = Math.ceil(taxRelevantTransactions.length / transactionsPerPage);
-        document.getElementById('pageInfo').textContent = `Page ${currentPage} of ${totalPages}`;
-        document.getElementById('prevPage').disabled = currentPage === 1;
-        document.getElementById('nextPage').disabled = currentPage === totalPages;
+      }
     }
 
-    function prevPage() {
-        if (currentPage > 1) {
-            currentPage--;
-            renderPage();
-        }
-    }
+    res.json({ allTransactions, taxRelevantTransactions });
 
-    function nextPage() {
-        const totalPages = Math.ceil(taxRelevantTransactions.length / transactionsPerPage);
-        if (currentPage < totalPages) {
-            currentPage++;
-            renderPage();
-        }
-    }
+  } catch (error) {
+    console.error('❌ Error in fetch-transactions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
-    function downloadTaxCSV() {
-        const headers = ['Date/time','Type of transaction','In','In currency','Out','Out currency','Fee','Fee currency','Tx Hash'];
-        const rows = taxRelevantTransactions.map(tx => {
-            const feeAmount = (BigInt(tx.fee || 0) / BigInt(10**18)).toString();
-            return [
-                new Date(tx.timestamp * 1000).toISOString(),
-                tx.function || 'N/A',
-                tx.inAmount, tx.inCurrency,
-                tx.outAmount, tx.outCurrency,
-                feeAmount, 'EGLD',
-                tx.txHash
-            ].join(',');
-        });
-        downloadCSV([headers.join(','), ...rows], 'multiversx_tax_transactions.csv');
-    }
-
-    function downloadFullCSV() {
-        const headers = ['txHash','sender','receiver','value','timestamp','status','function'];
-        const rows = allTransactions.map(tx => [
-            tx.txHash || '', tx.sender || '', tx.receiver || '',
-            tx.value || '0', new Date(tx.timestamp * 1000).toISOString(),
-            tx.status || '', tx.function || ''
-        ].join(','));
-        downloadCSV([headers.join(','), ...rows], 'multiversx_full_transactions.csv');
-    }
-
-    function downloadCSV(lines, filename) {
-        const blob = new Blob([lines.join('\\n')], { type: 'text/csv' });
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        window.URL.revokeObjectURL(url);
-    }
-</script>
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Proxy server running on port ${PORT}`);
+});
