@@ -1,4 +1,4 @@
-// server.js
+// server.js (tax-relevant filtered version)
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -119,17 +119,19 @@ app.post('/fetch-transactions', async (req, res) => {
             await delay(500);
         }
 
+        const taxRelevantFunctions = [
+            'claimrewards', 'claim', 'claimrewardsproxy', 'redelegaterewards',
+            'swaptokensfixedinput', 'swaptokensfixedoutput', 'multipairswap',
+            'transfer', 'wrapegld', 'unwrapegld',
+            'aggregateegld', 'aggregateesdt',
+            'esdttransfer', 'esdtnfttransfer', 'multiesdtnfttransfer',
+            'buy', 'sell', 'withdraw', 'claimlockedassets'
+        ];
+
         const taxRelevantTransactions = allTransactions.filter(tx => {
-            const func = tx.function || '';
+            const func = tx.function?.toLowerCase() || '';
             const hasValue = tx.value && BigInt(tx.value) > 0;
-            return hasValue || [
-                'claimRewards', 'claim', 'claimRewardsProxy',
-                'swapTokensFixedInput', 'swapTokensFixedOutput', 'multiPairSwap',
-                'transfer', 'wrapEgld', 'unwrapEgld',
-                'aggregateEgld', 'aggregateEsdt',
-                'reDelegateRewards', 'ESDTTransfer',
-                'ESDTNFTTransfer', 'buy', 'sell'
-            ].includes(func);
+            return hasValue || taxRelevantFunctions.includes(func);
         });
 
         const fetchTokenDecimals = async (tokenIdentifier) => {
@@ -158,7 +160,6 @@ app.post('/fetch-transactions', async (req, res) => {
             tx.outCurrency = 'EGLD';
 
             const relatedTransfers = transfers.filter(t => t.txHash === tx.txHash);
-            console.log(`🔍 TX ${tx.txHash} (${tx.function}) has ${relatedTransfers.length} related transfers`);
 
             const inTransfer = relatedTransfers.find(t => t.receiver === walletAddress);
             const outTransfer = relatedTransfers.find(t => t.sender === walletAddress);
