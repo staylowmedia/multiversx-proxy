@@ -1,4 +1,4 @@
-// server.js
+// server.js (support multiple in/out tokens as separate rows)
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -21,7 +21,6 @@ const decodeBase64ToString = base64 => Buffer.from(base64, 'base64').toString();
 
 app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate } = req.body;
-
   if (!walletAddress || !fromDate || !toDate) return res.status(400).json({ error: 'Missing required parameters' });
   if (!validateWalletAddress(walletAddress)) return res.status(400).json({ error: 'Invalid wallet address' });
 
@@ -29,13 +28,13 @@ app.post('/fetch-transactions', async (req, res) => {
   const toDateObj = new Date(toDate);
   const startTimestamp = Math.floor(fromDateObj.getTime() / 1000);
   const endTimestamp = Math.floor(toDateObj.getTime() / 1000);
-
   if (isNaN(startTimestamp) || isNaN(endTimestamp)) return res.status(400).json({ error: 'Invalid timestamps' });
   if (fromDateObj > toDateObj) return res.status(400).json({ error: 'Invalid date range' });
 
   let allTransactions = [];
   let transfers = [];
   let tokenDecimalsCache = {};
+  let taxRelevantTransactions = [];
 
   try {
     await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
@@ -75,13 +74,6 @@ app.post('/fetch-transactions', async (req, res) => {
       'buy', 'sell', 'withdraw', 'claimlockedassets'
     ];
 
-    const taxRelevantTransactions = allTransactions.filter(tx => {
-      const func = tx.function?.toLowerCase() || '';
-      const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
-      const hasTransfer = transfers.some(t => t.txHash === tx.txHash);
-      return withinDate && (hasTransfer || taxRelevantFunctions.includes(func));
-    });
-
     const fetchTokenDecimals = async (tokenIdentifier) => {
       const knownDecimals = {
         'EGLD': 18,
@@ -91,7 +83,6 @@ app.post('/fetch-transactions', async (req, res) => {
       };
       if (knownDecimals[tokenIdentifier]) return knownDecimals[tokenIdentifier];
       if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
-
       try {
         const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
         const decimals = response.data.decimals || 18;
@@ -102,11 +93,17 @@ app.post('/fetch-transactions', async (req, res) => {
       }
     };
 
-    for (let tx of taxRelevantTransactions) {
-      tx.inAmount = '0';
-      tx.inCurrency = 'EGLD';
-      tx.outAmount = '0';
-      tx.outCurrency = 'EGLD';
+    for (let tx of allTransactions) {
+      const func = tx.function?.toLowerCase() || '';
+      if (!(tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp)) continue;
+      if (!transfers.some(t => t.txHash === tx.txHash) && !taxRelevantFunctions.includes(func)) continue;
+
+      let baseTx = {
+        timestamp: tx.timestamp,
+        function: tx.function || 'N/A',
+        txHash: tx.txHash,
+        fee: tx.fee || '0'
+      };
 
       try {
         const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
@@ -114,16 +111,8 @@ app.post('/fetch-transactions', async (req, res) => {
 
         for (const scr of scResults) {
           if (!scr.data) continue;
-
           const decodedData = decodeBase64ToString(scr.data);
           if (!decodedData.includes('@')) continue;
-
-          console.log('--- SCResult ---');
-          console.log('tx:', tx.txHash);
-          console.log('scr.receiver:', scr.receiver);
-          console.log('scr.originalReceiver:', scr.originalReceiver);
-          console.log('decodedData:', decodedData);
-          console.log('walletAddress:', walletAddress);
 
           const parts = decodedData.split('@');
           const callType = parts[0].toLowerCase();
@@ -140,24 +129,20 @@ app.post('/fetch-transactions', async (req, res) => {
                                  (scr.originalReceiver?.toLowerCase() === walletAddress.toLowerCase()) ||
                                  (decodedData.startsWith('ESDTTransfer') && detailed.data.receiver === walletAddress);
 
+              const txClone = { ...baseTx };
               if (isReceiver && formattedAmount !== '0') {
-                if (tx.inCurrency === 'EGLD' || tx.inAmount === '0') {
-                  tx.inAmount = formattedAmount;
-                  tx.inCurrency = token;
-                } else if (tx.inCurrency === token) {
-                  tx.inAmount = new BigNumber(tx.inAmount).plus(formattedAmount).toFixed(decimals);
-                }
+                txClone.inAmount = formattedAmount;
+                txClone.inCurrency = token;
+                txClone.outAmount = '0';
+                txClone.outCurrency = 'EGLD';
+                taxRelevantTransactions.push(txClone);
+              } else if (scr.sender === walletAddress && formattedAmount !== '0') {
+                txClone.outAmount = formattedAmount;
+                txClone.outCurrency = token;
+                txClone.inAmount = '0';
+                txClone.inCurrency = 'EGLD';
+                taxRelevantTransactions.push(txClone);
               }
-
-              if (scr.sender === walletAddress && formattedAmount !== '0') {
-                if (tx.outCurrency === 'EGLD' || tx.outAmount === '0') {
-                  tx.outAmount = formattedAmount;
-                  tx.outCurrency = token;
-                } else if (tx.outCurrency === token) {
-                  tx.outAmount = new BigNumber(tx.outAmount).plus(formattedAmount).toFixed(decimals);
-                }
-              }
-
             } catch (err) {
               console.warn(`Failed to parse smart contract result: ${err.message}`);
             }
