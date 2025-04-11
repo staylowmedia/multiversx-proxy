@@ -86,7 +86,8 @@ app.post('/fetch-transactions', async (req, res) => {
             from: chunkStart,
             to: chunkEnd,
             size: 500,
-            order: 'asc'
+            order: 'asc',
+            start: 0
           }
         });
         console.log(`🔄 Fetched ${response.data.length} transfers from ${chunkStart}–${chunkEnd}`);
@@ -156,26 +157,30 @@ app.post('/fetch-transactions', async (req, res) => {
         for (const scr of scResults) {
           if (!scr.data || !scr.data.includes('@')) continue;
 
+          const parts = scr.data.split('@');
+          const callType = parts[0].toLowerCase();
+
           try {
-            const parts = scr.data.split('@');
-            if (parts.length >= 3 && parts[0].toLowerCase() === 'esdttransfer') {
+            if ((callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') && parts.length >= 3) {
               const tokenHex = parts[1];
               const amountHex = parts[2];
               const token = decodeHexToString(tokenHex);
               const amount = decodeHexToBigInt(amountHex);
               const decimals = await fetchTokenDecimals(token);
 
-              if (scr.receiver === walletAddress) {
-                tx.inAmount = (amount / BigInt(10 ** decimals)).toString();
+              const formattedAmount = (amount / BigInt(10 ** decimals)).toString();
+
+              if (scr.receiver === walletAddress || scr.originalTxHash === tx.txHash) {
+                tx.inAmount = formattedAmount;
                 tx.inCurrency = token;
               }
-              if (scr.sender === walletAddress) {
-                tx.outAmount = (amount / BigInt(10 ** decimals)).toString();
+              if (scr.sender === walletAddress || scr.originalTxHash === tx.txHash) {
+                tx.outAmount = formattedAmount;
                 tx.outCurrency = token;
               }
             }
           } catch (decodeError) {
-            console.warn(`⚠️ Failed to decode smart contract result data for ${tx.txHash}:`, decodeError.message);
+            console.warn(`⚠️ Failed to decode smart contract result for ${tx.txHash}:`, decodeError.message);
           }
         }
       } catch (error) {
