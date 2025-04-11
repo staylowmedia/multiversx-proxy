@@ -26,6 +26,10 @@ function decodeHexToBigInt(hex) {
   return BigInt(`0x${hex}`);
 }
 
+function decodeBase64ToString(base64) {
+  return Buffer.from(base64, 'base64').toString();
+}
+
 app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate } = req.body;
 
@@ -160,7 +164,7 @@ app.post('/fetch-transactions', async (req, res) => {
 
       // Håndter inTransfer (mottatt)
       if (inTransfer && inTransfer.value && inTransfer.value !== '0') {
-        const identifier = inTransfer.identifier || 'EGLD'; // Anta EGLD hvis identifier mangler
+        const identifier = inTransfer.identifier || 'EGLD';
         const decimals = await fetchTokenDecimals(identifier);
         console.log(`Calculating inAmount: value=${inTransfer.value}, decimals=${decimals}, identifier=${identifier}`);
         tx.inAmount = new BigNumber(inTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
@@ -169,13 +173,30 @@ app.post('/fetch-transactions', async (req, res) => {
       }
 
       // Håndter outTransfer (sendt)
-      if (outTransfer && outTransfer.value && outTransfer.value !== '0') {
-        const identifier = outTransfer.identifier || 'EGLD'; // Anta EGLD hvis identifier mangler
-        const decimals = await fetchTokenDecimals(identifier);
-        console.log(`Calculating outAmount: value=${outTransfer.value}, decimals=${decimals}, identifier=${identifier}`);
-        tx.outAmount = new BigNumber(outTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-        console.log(`Formatted outAmount: ${tx.outAmount}`);
-        tx.outCurrency = identifier;
+      if (outTransfer) {
+        let identifier = outTransfer.identifier || 'EGLD';
+        let value = outTransfer.value;
+
+        // Sjekk om dette er en ESDT-overføring ved å parse data-feltet
+        if (outTransfer.data && outTransfer.data.startsWith('RVNEVFRyYW5zZmVy')) {
+          const decodedData = decodeBase64ToString(outTransfer.data);
+          const parts = decodedData.split('@');
+          if (parts[0] === 'ESDTTransfer' && parts.length >= 3) {
+            const tokenHex = parts[1];
+            const amountHex = parts[2];
+            identifier = decodeHexToString(tokenHex);
+            value = decodeHexToBigInt(amountHex).toString();
+            console.log(`Parsed ESDTTransfer from outTransfer: identifier=${identifier}, value=${value}`);
+          }
+        }
+
+        if (value && value !== '0') {
+          const decimals = await fetchTokenDecimals(identifier);
+          console.log(`Calculating outAmount: value=${value}, decimals=${decimals}, identifier=${identifier}`);
+          tx.outAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+          console.log(`Formatted outAmount: ${tx.outAmount}`);
+          tx.outCurrency = identifier;
+        }
       }
 
       // Håndter smart contract-resultater
@@ -200,12 +221,12 @@ app.post('/fetch-transactions', async (req, res) => {
             console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, formattedAmount=${formattedAmount}`);
 
             // Sjekk om dette er en mottatt transaksjon
-            if (scr.receiver === walletAddress && scr.value !== '0') {
+            if (scr.receiver === walletAddress && amount > 0) {
               tx.inAmount = formattedAmount;
               tx.inCurrency = token;
             }
             // Sjekk om dette er en sendt transaksjon
-            if (scr.sender === walletAddress && scr.value !== '0') {
+            if (scr.sender === walletAddress && amount > 0) {
               tx.outAmount = formattedAmount;
               tx.outCurrency = token;
             }
