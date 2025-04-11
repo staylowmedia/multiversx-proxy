@@ -243,13 +243,22 @@ app.post('/fetch-transactions', async (req, res) => {
 
         for (const scr of scResults) {
           console.log(`Entering scResult loop for tx ${tx.txHash}, scr:`, scr);
-          if (!scr.data || !scr.data.includes('@')) {
-            console.log(`Skipping scResult for tx ${tx.txHash}: No data or no @ symbol`);
+          if (!scr.data) {
+            console.log(`Skipping scResult for tx ${tx.txHash}: No data`);
             continue;
           }
-          const parts = scr.data.split('@');
+
+          // Dekod data før vi sjekker for @
+          const decodedData = decodeBase64ToString(scr.data);
+          console.log(`Decoded data for tx ${tx.txHash}: ${decodedData}`);
+          if (!decodedData.includes('@')) {
+            console.log(`Skipping scResult for tx ${tx.txHash}: No @ symbol in decoded data`);
+            continue;
+          }
+
+          const parts = decodedData.split('@');
           console.log(`Split data for tx ${tx.txHash}: parts=${parts}`);
-          const callType = decodeBase64ToString(parts[0]).toLowerCase();
+          const callType = parts[0].toLowerCase();
           console.log(`Processing scResult for tx ${tx.txHash}: callType=${callType}`);
 
           if (callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') {
