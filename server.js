@@ -131,7 +131,8 @@ app.post('/fetch-transactions', async (req, res) => {
       const knownDecimals = {
         'EGLD': 18,
         'WEGLD-bd4d79': 18,
-        'MEX-43535633537': 18
+        'MEX-43535633537': 18,
+        'XMEX-f1c3a3': 18 // Lagt til XMEX-f1c3a3
       };
 
       if (knownDecimals[tokenIdentifier]) {
@@ -248,7 +249,6 @@ app.post('/fetch-transactions', async (req, res) => {
             continue;
           }
 
-          // Dekod data før vi sjekker for @
           const decodedData = decodeBase64ToString(scr.data);
           console.log(`Decoded data for tx ${tx.txHash}: ${decodedData}`);
           if (!decodedData.includes('@')) {
@@ -276,6 +276,7 @@ app.post('/fetch-transactions', async (req, res) => {
 
               console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, decimals=${decimals}, formattedAmount=${formattedAmount}`);
               console.log(`Before update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
+              console.log(`Receiver check: scr.receiver=${scr.receiver}, walletAddress=${walletAddress}`);
 
               if (scr.receiver === walletAddress && amount > 0 && formattedAmount !== '0') {
                 if (tx.inAmount === '0') {
