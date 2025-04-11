@@ -158,22 +158,27 @@ app.post('/fetch-transactions', async (req, res) => {
       console.log(`inTransfer for tx ${tx.txHash}:`, inTransfer);
       console.log(`outTransfer for tx ${tx.txHash}:`, outTransfer);
 
-      if (inTransfer?.identifier && inTransfer.value) {
-        const decimals = await fetchTokenDecimals(inTransfer.identifier);
-        console.log(`Calculating inAmount: value=${inTransfer.value}, decimals=${decimals}`);
+      // Håndter inTransfer (mottatt)
+      if (inTransfer && inTransfer.value && inTransfer.value !== '0') {
+        const identifier = inTransfer.identifier || 'EGLD'; // Anta EGLD hvis identifier mangler
+        const decimals = await fetchTokenDecimals(identifier);
+        console.log(`Calculating inAmount: value=${inTransfer.value}, decimals=${decimals}, identifier=${identifier}`);
         tx.inAmount = new BigNumber(inTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
         console.log(`Formatted inAmount: ${tx.inAmount}`);
-        tx.inCurrency = inTransfer.identifier;
+        tx.inCurrency = identifier;
       }
 
-      if (outTransfer?.identifier && outTransfer.value) {
-        const decimals = await fetchTokenDecimals(outTransfer.identifier);
-        console.log(`Calculating outAmount: value=${outTransfer.value}, decimals=${decimals}`);
+      // Håndter outTransfer (sendt)
+      if (outTransfer && outTransfer.value && outTransfer.value !== '0') {
+        const identifier = outTransfer.identifier || 'EGLD'; // Anta EGLD hvis identifier mangler
+        const decimals = await fetchTokenDecimals(identifier);
+        console.log(`Calculating outAmount: value=${outTransfer.value}, decimals=${decimals}, identifier=${identifier}`);
         tx.outAmount = new BigNumber(outTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
         console.log(`Formatted outAmount: ${tx.outAmount}`);
-        tx.outCurrency = outTransfer.identifier;
+        tx.outCurrency = identifier;
       }
 
+      // Håndter smart contract-resultater
       try {
         const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
         const scResults = detailed.data.results || [];
@@ -194,11 +199,13 @@ app.post('/fetch-transactions', async (req, res) => {
 
             console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, formattedAmount=${formattedAmount}`);
 
-            if ((scr.receiver === walletAddress || scr.originalTxHash === tx.txHash) && (!tx.inAmount || tx.inAmount === '0')) {
+            // Sjekk om dette er en mottatt transaksjon
+            if (scr.receiver === walletAddress && scr.value !== '0') {
               tx.inAmount = formattedAmount;
               tx.inCurrency = token;
             }
-            if ((scr.sender === walletAddress || scr.originalTxHash === tx.txHash) && (!tx.outAmount || tx.outAmount === '0')) {
+            // Sjekk om dette er en sendt transaksjon
+            if (scr.sender === walletAddress && scr.value !== '0') {
               tx.outAmount = formattedAmount;
               tx.outCurrency = token;
             }
