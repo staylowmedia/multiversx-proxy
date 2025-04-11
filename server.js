@@ -51,7 +51,6 @@ app.post('/fetch-transactions', async (req, res) => {
 
     const pageSize = 500;
 
-    // Fetch transactions
     for (let fromIndex = 0; fromIndex < 5000; fromIndex += pageSize) {
       const params = {
         after: startTimestamp,
@@ -69,7 +68,6 @@ app.post('/fetch-transactions', async (req, res) => {
       if (batch.length < pageSize) break;
     }
 
-    // Fetch token transfers in daily chunks
     const SECONDS_IN_DAY = 86400;
     for (let ts = startTimestamp; ts < endTimestamp; ts += SECONDS_IN_DAY) {
       const chunkStart = ts;
@@ -143,13 +141,25 @@ app.post('/fetch-transactions', async (req, res) => {
         tx.outCurrency = outTransfer.identifier;
       }
 
-      if (tx.inAmount === '0' && tx.outAmount === '0') {
-        if (BigInt(tx.value || 0) > 0) {
-          if (tx.sender === walletAddress) {
-            tx.outAmount = (BigInt(tx.value) / BigInt(10 ** 18)).toString();
-          } else if (tx.receiver === walletAddress) {
-            tx.inAmount = (BigInt(tx.value) / BigInt(10 ** 18)).toString();
+      if ((tx.inAmount === '0' && tx.outAmount === '0') || ['swaptokensfixedinput', 'swaptokensfixedoutput', 'wrapegld', 'unwrapegld'].includes(tx.function?.toLowerCase())) {
+        try {
+          const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
+          const operations = detailed.data.operations || [];
+
+          for (const op of operations) {
+            if (op.sender === walletAddress) {
+              const decimals = await fetchTokenDecimals(op.identifier);
+              tx.outAmount = (BigInt(op.value) / BigInt(10 ** decimals)).toString();
+              tx.outCurrency = op.identifier;
+            }
+            if (op.receiver === walletAddress) {
+              const decimals = await fetchTokenDecimals(op.identifier);
+              tx.inAmount = (BigInt(op.value) / BigInt(10 ** decimals)).toString();
+              tx.inCurrency = op.identifier;
+            }
           }
+        } catch (error) {
+          console.warn(`⚠️ Could not fetch operations for ${tx.txHash}:`, error.response?.data || error.message);
         }
       }
     }
