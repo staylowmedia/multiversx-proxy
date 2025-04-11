@@ -145,6 +145,7 @@ app.post('/fetch-transactions', async (req, res) => {
         try {
           const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
           const operations = detailed.data.operations || [];
+          const scResults = detailed.data.smartContractResults || [];
 
           for (const op of operations) {
             if (op.sender === walletAddress) {
@@ -156,6 +157,19 @@ app.post('/fetch-transactions', async (req, res) => {
               const decimals = await fetchTokenDecimals(op.identifier);
               tx.inAmount = (BigInt(op.value) / BigInt(10 ** decimals)).toString();
               tx.inCurrency = op.identifier;
+            }
+          }
+
+          for (const scr of scResults) {
+            if (scr.receiver === walletAddress && scr.identifier) {
+              const decimals = await fetchTokenDecimals(scr.identifier);
+              tx.inAmount = (BigInt(scr.value) / BigInt(10 ** decimals)).toString();
+              tx.inCurrency = scr.identifier;
+            }
+            if (scr.sender === walletAddress && scr.identifier) {
+              const decimals = await fetchTokenDecimals(scr.identifier);
+              tx.outAmount = (BigInt(scr.value) / BigInt(10 ** decimals)).toString();
+              tx.outCurrency = scr.identifier;
             }
           }
         } catch (error) {
