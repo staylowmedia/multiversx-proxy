@@ -1,4 +1,4 @@
-// server.js with debugging for date chunks and filtering
+// server.js with full tax transformation logic reintegrated
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -118,8 +118,44 @@ app.post('/fetch-transactions', async (req, res) => {
       return (hasTransfer || taxRelevantFunctions.includes(func));
     });
 
-    console.log('✅ Found tax-relevant:', taxRelevantTransactions.length);
+    for (let tx of taxRelevantTransactions) {
+      tx.inAmount = '0';
+      tx.inCurrency = 'EGLD';
+      tx.outAmount = '0';
+      tx.outCurrency = 'EGLD';
 
+      const related = transfers.filter(t => t.txHash === tx.txHash);
+      const inTransfer = related.find(t => t.receiver === walletAddress);
+      const outTransfer = related.find(t => t.sender === walletAddress);
+
+      if (inTransfer) {
+        let identifier = inTransfer.identifier || 'EGLD';
+        let value = inTransfer.value;
+        if (value && value !== '0') {
+          const decimals = await fetchTokenDecimals(identifier);
+          const formattedAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+          if (formattedAmount !== '0') {
+            tx.inAmount = formattedAmount;
+            tx.inCurrency = identifier;
+          }
+        }
+      }
+
+      if (outTransfer) {
+        let identifier = outTransfer.identifier || 'EGLD';
+        let value = outTransfer.value;
+        if (value && value !== '0') {
+          const decimals = await fetchTokenDecimals(identifier);
+          const formattedAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+          if (formattedAmount !== '0') {
+            tx.outAmount = formattedAmount;
+            tx.outCurrency = identifier;
+          }
+        }
+      }
+    }
+
+    console.log('✅ Found tax-relevant:', taxRelevantTransactions.length);
     res.json({ allTransactions, taxRelevantTransactions });
   } catch (error) {
     console.error('❌ Error in fetch-transactions:', error);
