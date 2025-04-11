@@ -1,4 +1,4 @@
-// server.js (tax-relevant filtered version)
+// server.js (refactored to use `start` for transfers)
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -88,17 +88,17 @@ app.post('/fetch-transactions', async (req, res) => {
             }
         }
 
-        const chunkSize = 60 * 60 * 24 * 7;
-        for (let chunkStart = startTimestamp; chunkStart < endTimestamp; chunkStart += chunkSize) {
-            const chunkEnd = Math.min(chunkStart + chunkSize, endTimestamp);
+        let transferIndex = 0;
+        const transferPromises = [];
+        const maxTransfersPerBatch = 500;
+
+        while (true) {
             const params = {
-                from: chunkStart,
-                to: chunkEnd,
-                size: 500,
-                order: 'asc',
-                start: 0
+                start: transferIndex,
+                size: maxTransfersPerBatch,
+                order: 'asc'
             };
-            const cacheKey = `transfers_${walletAddress}_${chunkStart}_${chunkEnd}`;
+            const cacheKey = `transfers_${walletAddress}_${transferIndex}`;
             let batch = cache.get(cacheKey);
 
             if (!batch) {
@@ -107,8 +107,8 @@ app.post('/fetch-transactions', async (req, res) => {
                     batch = response.data;
                     cache.set(cacheKey, batch);
                 } catch (error) {
-                    console.error(`Transfer fetch failed for chunk ${chunkStart}-${chunkEnd}:`, error.response?.data || error.message);
-                    continue;
+                    console.error(`Transfer fetch failed at index ${transferIndex}:`, error.response?.data || error.message);
+                    break;
                 }
             }
 
@@ -116,6 +116,8 @@ app.post('/fetch-transactions', async (req, res) => {
                 transfers = transfers.concat(batch);
             }
 
+            if (!batch || batch.length < maxTransfersPerBatch) break;
+            transferIndex += maxTransfersPerBatch;
             await delay(500);
         }
 
@@ -131,7 +133,8 @@ app.post('/fetch-transactions', async (req, res) => {
         const taxRelevantTransactions = allTransactions.filter(tx => {
             const func = tx.function?.toLowerCase() || '';
             const hasValue = tx.value && BigInt(tx.value) > 0;
-            return hasValue || taxRelevantFunctions.includes(func);
+            const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
+            return withinDate && (hasValue || taxRelevantFunctions.includes(func));
         });
 
         const fetchTokenDecimals = async (tokenIdentifier) => {
