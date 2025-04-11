@@ -132,6 +132,14 @@ app.post('/fetch-transactions', async (req, res) => {
         console.log(`Token ${tokenIdentifier} has 18 decimals (hardcoded)`);
         return 18;
       }
+      if (tokenIdentifier === 'WEGLD-bd4d79') {
+        console.log(`Token ${tokenIdentifier} has 18 decimals (hardcoded)`);
+        return 18;
+      }
+      if (tokenIdentifier === 'MEX-43535633537') {
+        console.log(`Token ${tokenIdentifier} has 18 decimals (hardcoded)`);
+        return 18;
+      }
       if (tokenDecimalsCache[tokenIdentifier]) {
         console.log(`Token ${tokenIdentifier} has ${tokenDecimalsCache[tokenIdentifier]} decimals (cached)`);
         return tokenDecimalsCache[tokenIdentifier];
@@ -143,7 +151,7 @@ app.post('/fetch-transactions', async (req, res) => {
         console.log(`Token ${tokenIdentifier} has ${decimals} decimals (fetched from API)`);
         return decimals;
       } catch (error) {
-        console.warn(`Failed to fetch decimals for ${tokenIdentifier}, defaulting to 18:`, error.message);
+        console.warn(`Failed to fetch decimals for ${tokenIdentifier}, defaulting to 18:`, error.response?.data || error.message);
         return 18;
       }
     };
@@ -163,13 +171,30 @@ app.post('/fetch-transactions', async (req, res) => {
       console.log(`outTransfer for tx ${tx.txHash}:`, outTransfer);
 
       // Håndter inTransfer (mottatt)
-      if (inTransfer && inTransfer.value && inTransfer.value !== '0') {
-        const identifier = inTransfer.identifier || 'EGLD';
-        const decimals = await fetchTokenDecimals(identifier);
-        console.log(`Calculating inAmount: value=${inTransfer.value}, decimals=${decimals}, identifier=${identifier}`);
-        tx.inAmount = new BigNumber(inTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-        console.log(`Formatted inAmount: ${tx.inAmount}`);
-        tx.inCurrency = identifier;
+      if (inTransfer) {
+        let identifier = inTransfer.identifier || 'EGLD';
+        let value = inTransfer.value;
+
+        // Sjekk om dette er en ESDT-overføring ved å parse data-feltet
+        if (inTransfer.data && inTransfer.data.startsWith('RVNEVFRyYW5zZmVy')) {
+          const decodedData = decodeBase64ToString(inTransfer.data);
+          const parts = decodedData.split('@');
+          if (parts[0] === 'ESDTTransfer' && parts.length >= 3) {
+            const tokenHex = parts[1];
+            const amountHex = parts[2];
+            identifier = decodeHexToString(tokenHex);
+            value = decodeHexToBigInt(amountHex).toString();
+            console.log(`Parsed ESDTTransfer from inTransfer: identifier=${identifier}, value=${value}`);
+          }
+        }
+
+        if (value && value !== '0') {
+          const decimals = await fetchTokenDecimals(identifier);
+          console.log(`Calculating inAmount: value=${value}, decimals=${decimals}, identifier=${identifier}`);
+          tx.inAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+          console.log(`Formatted inAmount: ${tx.inAmount}`);
+          tx.inCurrency = identifier;
+        }
       }
 
       // Håndter outTransfer (sendt)
@@ -221,12 +246,12 @@ app.post('/fetch-transactions', async (req, res) => {
             console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, formattedAmount=${formattedAmount}`);
 
             // Sjekk om dette er en mottatt transaksjon
-            if (scr.receiver === walletAddress && amount > 0) {
+            if (scr.receiver === walletAddress && amount > 0 && formattedAmount !== '0') {
               tx.inAmount = formattedAmount;
               tx.inCurrency = token;
             }
             // Sjekk om dette er en sendt transaksjon
-            if (scr.sender === walletAddress && amount > 0) {
+            if (scr.sender === walletAddress && amount > 0 && formattedAmount !== '0') {
               tx.outAmount = formattedAmount;
               tx.outCurrency = token;
             }
