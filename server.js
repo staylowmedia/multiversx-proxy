@@ -90,8 +90,8 @@ app.post('/fetch-transactions', async (req, res) => {
         }
 
         const params = {
-          after: chunkStart, // Endret fra 'from' til 'after'
-          before: chunkEnd,  // Endret fra 'to' til 'before'
+          after: chunkStart,
+          before: chunkEnd,
           size: 500,
           order: 'asc',
           start: startIndex
@@ -124,14 +124,22 @@ app.post('/fetch-transactions', async (req, res) => {
     });
 
     const fetchTokenDecimals = async (tokenIdentifier) => {
-      if (tokenIdentifier === 'EGLD') return 18;
-      if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
+      if (tokenIdentifier === 'EGLD') {
+        console.log(`Token ${tokenIdentifier} has 18 decimals (hardcoded)`);
+        return 18;
+      }
+      if (tokenDecimalsCache[tokenIdentifier]) {
+        console.log(`Token ${tokenIdentifier} has ${tokenDecimalsCache[tokenIdentifier]} decimals (cached)`);
+        return tokenDecimalsCache[tokenIdentifier];
+      }
       try {
         const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
         const decimals = response.data.decimals || 18;
         tokenDecimalsCache[tokenIdentifier] = decimals;
+        console.log(`Token ${tokenIdentifier} has ${decimals} decimals (fetched from API)`);
         return decimals;
-      } catch {
+      } catch (error) {
+        console.warn(`Failed to fetch decimals for ${tokenIdentifier}, defaulting to 18:`, error.message);
         return 18;
       }
     };
@@ -147,21 +155,29 @@ app.post('/fetch-transactions', async (req, res) => {
       const inTransfer = related.find(t => t.receiver === walletAddress);
       const outTransfer = related.find(t => t.sender === walletAddress);
 
+      console.log(`inTransfer for tx ${tx.txHash}:`, inTransfer);
+      console.log(`outTransfer for tx ${tx.txHash}:`, outTransfer);
+
       if (inTransfer?.identifier && inTransfer.value) {
         const decimals = await fetchTokenDecimals(inTransfer.identifier);
+        console.log(`Calculating inAmount: value=${inTransfer.value}, decimals=${decimals}`);
         tx.inAmount = new BigNumber(inTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+        console.log(`Formatted inAmount: ${tx.inAmount}`);
         tx.inCurrency = inTransfer.identifier;
       }
 
       if (outTransfer?.identifier && outTransfer.value) {
         const decimals = await fetchTokenDecimals(outTransfer.identifier);
+        console.log(`Calculating outAmount: value=${outTransfer.value}, decimals=${decimals}`);
         tx.outAmount = new BigNumber(outTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+        console.log(`Formatted outAmount: ${tx.outAmount}`);
         tx.outCurrency = outTransfer.identifier;
       }
 
       try {
         const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
         const scResults = detailed.data.results || [];
+        console.log(`Smart contract results for tx ${tx.txHash}:`, scResults);
 
         for (const scr of scResults) {
           if (!scr.data || !scr.data.includes('@')) continue;
@@ -175,6 +191,8 @@ app.post('/fetch-transactions', async (req, res) => {
             const amount = decodeHexToBigInt(amountHex);
             const decimals = await fetchTokenDecimals(token);
             const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+
+            console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, formattedAmount=${formattedAmount}`);
 
             if ((scr.receiver === walletAddress || scr.originalTxHash === tx.txHash) && (!tx.inAmount || tx.inAmount === '0')) {
               tx.inAmount = formattedAmount;
