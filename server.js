@@ -103,4 +103,100 @@ app.post('/fetch-transactions', async (req, res) => {
     console.log(`Total transfers fetched: ${transfers.length}`);
 
     const taxRelevantFunctions = [
-      '
+      'claimrewards', 'claim', 'claimrewardsproxy', 'redelegaterewards',
+      'swaptokensfixedinput', 'swaptokensfixedoutput', 'multipairswap',
+      'transfer', 'wrapegld', 'unwrapegld',
+      'aggregateegld', 'aggregateesdt',
+      'esdttransfer', 'esdtnfttransfer', 'multiesdtnfttransfer',
+      'buy', 'sell', 'withdraw', 'claimlockedassets'
+    ];
+
+    const taxRelevantTransactions = allTransactions.filter(tx => {
+      const func = tx.function?.toLowerCase() || '';
+      const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
+      const hasTransfer = transfers.some(t => t.txHash === tx.txHash);
+      return withinDate && (hasTransfer || taxRelevantFunctions.includes(func));
+    });
+
+    const fetchTokenDecimals = async (tokenIdentifier) => {
+      if (tokenIdentifier === 'EGLD') return 18;
+      if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
+      try {
+        const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
+        const decimals = response.data.decimals || 18;
+        tokenDecimalsCache[tokenIdentifier] = decimals;
+        return decimals;
+      } catch {
+        return 18;
+      }
+    };
+
+    for (let tx of taxRelevantTransactions) {
+      tx.inAmount = '0';
+      tx.inCurrency = 'EGLD';
+      tx.outAmount = '0';
+      tx.outCurrency = 'EGLD';
+
+      const related = transfers.filter(t => t.txHash === tx.txHash);
+      console.log(`Found ${related.length} transfers for tx ${tx.txHash}`);
+      const inTransfer = related.find(t => t.receiver === walletAddress);
+      const outTransfer = related.find(t => t.sender === walletAddress);
+
+      if (inTransfer?.identifier && inTransfer.value) {
+        const decimals = await fetchTokenDecimals(inTransfer.identifier);
+        tx.inAmount = new BigNumber(inTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+        tx.inCurrency = inTransfer.identifier;
+      }
+
+      if (outTransfer?.identifier && outTransfer.value) {
+        const decimals = await fetchTokenDecimals(outTransfer.identifier);
+        tx.outAmount = new BigNumber(outTransfer.value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+        tx.outCurrency = outTransfer.identifier;
+      }
+
+      try {
+        const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
+        const scResults = detailed.data.results || [];
+
+        for (const scr of scResults) {
+          if (!scr.data || !scr.data.includes('@')) continue;
+          const parts = scr.data.split('@');
+          const callType = parts[0].toLowerCase();
+
+          if ((callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') && parts.length >= 3) {
+            const tokenHex = parts[1];
+            const amountHex = parts[2];
+            const token = decodeHexToString(tokenHex);
+            const amount = decodeHexToBigInt(amountHex);
+            const decimals = await fetchTokenDecimals(token);
+            const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+
+            if ((scr.receiver === walletAddress || scr.originalTxHash === tx.txHash) && (!tx.inAmount || tx.inAmount === '0')) {
+              tx.inAmount = formattedAmount;
+              tx.inCurrency = token;
+            }
+            if ((scr.sender === walletAddress || scr.originalTxHash === tx.txHash) && (!tx.outAmount || tx.outAmount === '0')) {
+              tx.outAmount = formattedAmount;
+              tx.outCurrency = token;
+            }
+          } else {
+            console.log(`Unknown callType: ${callType} for tx ${tx.txHash}`);
+          }
+        }
+      } catch (error) {
+        console.warn(`⚠️ Could not fetch operations for ${tx.txHash}:`, error.response?.data || error.message);
+      }
+    }
+
+    res.json({ allTransactions, taxRelevantTransactions });
+
+  } catch (error) {
+    console.error('❌ Error in fetch-transactions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Proxy server running on port ${PORT}`);
+});
