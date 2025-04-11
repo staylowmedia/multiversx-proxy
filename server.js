@@ -85,7 +85,8 @@ app.post('/fetch-transactions', async (req, res) => {
       const knownDecimals = {
         'EGLD': 18,
         'WEGLD-bd4d79': 18,
-        'MEX-43535633537': 18
+        'MEX-43535633537': 18,
+        'XMEX-4553434d4558': 18
       };
       if (knownDecimals[tokenIdentifier]) return knownDecimals[tokenIdentifier];
       if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
@@ -106,65 +107,9 @@ app.post('/fetch-transactions', async (req, res) => {
       tx.outAmount = '0';
       tx.outCurrency = 'EGLD';
 
-      const related = transfers.filter(t => t.txHash === tx.txHash);
-      const inTransfer = related.find(t => t.receiver === walletAddress);
-      const outTransfer = related.find(t => t.sender === walletAddress);
-
-      if (inTransfer) {
-        let identifier = inTransfer.identifier || 'EGLD';
-        let value = inTransfer.value;
-
-        if (inTransfer.data?.startsWith('RVNEVFRyYW5zZmVy')) {
-          const decodedData = decodeBase64ToString(inTransfer.data);
-          const parts = decodedData.split('@');
-          if (parts[0] === 'ESDTTransfer' && parts.length >= 3) {
-            identifier = decodeHexToString(parts[1]);
-            value = decodeHexToBigInt(parts[2]).toString();
-          }
-        }
-
-        if (value && value !== '0') {
-          const decimals = await fetchTokenDecimals(identifier);
-          const formatted = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-          if (formatted !== '0') {
-            tx.inAmount = formatted;
-            tx.inCurrency = identifier;
-          }
-        }
-      }
-
-      if (outTransfer) {
-        let identifier = outTransfer.identifier || 'EGLD';
-        let value = outTransfer.value;
-
-        if (outTransfer.data?.startsWith('RVNEVFRyYW5zZmVy')) {
-          const decodedData = decodeBase64ToString(outTransfer.data);
-          const parts = decodedData.split('@');
-          if (parts[0] === 'ESDTTransfer' && parts.length >= 3) {
-            identifier = decodeHexToString(parts[1]);
-            value = decodeHexToBigInt(parts[2]).toString();
-          }
-        }
-
-        if (value && value !== '0') {
-          const decimals = await fetchTokenDecimals(identifier);
-          const formatted = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-          if (formatted !== '0') {
-            tx.outAmount = formatted;
-            tx.outCurrency = identifier;
-          }
-        }
-      }
-
       try {
         const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-        let scResults = detailed.data.results || [];
-
-        scResults.sort((a, b) => {
-          const aIsEsdt = a.data && a.data.startsWith('RVNEVFRyYW5zZmVy') ? 1 : 0;
-          const bIsEsdt = b.data && b.data.startsWith('RVNEVFRyYW5zZmVy') ? 1 : 0;
-          return aIsEsdt - bIsEsdt;
-        });
+        const scResults = detailed.data.results || [];
 
         for (const scr of scResults) {
           if (!scr.data) continue;
@@ -203,24 +148,24 @@ app.post('/fetch-transactions', async (req, res) => {
               }
 
             } catch (err) {
-              console.warn(`⚠️ Failed to parse smart contract result: ${err.message}`);
+              console.warn(`Failed to parse smart contract result: ${err.message}`);
             }
           }
         }
       } catch (error) {
-        console.warn(`⚠️ Could not fetch operations for ${tx.txHash}:`, error.response?.data || error.message);
+        console.warn(`Could not fetch SCResults for ${tx.txHash}:`, error.response?.data || error.message);
       }
     }
 
     res.json({ allTransactions, taxRelevantTransactions });
 
   } catch (error) {
-    console.error('❌ Error in fetch-transactions:', error);
+    console.error('Error in fetch-transactions:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Proxy server running on port ${PORT}`);
+  console.log(`Proxy server running on port ${PORT}`);
 });
