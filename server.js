@@ -1,4 +1,4 @@
-// server.js (updated to separate LP tokens and XMEX per line in claimRewards)
+// server.js (fix to combine in/out on same line if same tx)
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -100,6 +100,17 @@ app.post('/fetch-transactions', async (req, res) => {
       const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
       const scResults = detailed.data.results || [];
 
+      const baseTx = {
+        timestamp: tx.timestamp,
+        function: tx.function || 'N/A',
+        txHash: tx.txHash,
+        fee: tx.fee || '0',
+        inAmount: '0',
+        inCurrency: 'EGLD',
+        outAmount: '0',
+        outCurrency: 'EGLD'
+      };
+
       for (const scr of scResults) {
         if (!scr.data) continue;
         const decodedData = decodeBase64ToString(scr.data);
@@ -118,31 +129,13 @@ app.post('/fetch-transactions', async (req, res) => {
             const isReceiver = (scr.receiver?.toLowerCase() === walletAddress.toLowerCase()) ||
                                (scr.originalReceiver?.toLowerCase() === walletAddress.toLowerCase());
 
-            const isLpToken = token.includes('FL') || token.includes('LP');
-
             if (isReceiver && formattedAmount !== '0') {
-              taxRelevantTransactions.push({
-                timestamp: tx.timestamp,
-                function: tx.function || 'N/A',
-                txHash: tx.txHash,
-                fee: tx.fee || '0',
-                inAmount: formattedAmount,
-                inCurrency: token,
-                outAmount: '0',
-                outCurrency: 'EGLD'
-              });
+              baseTx.inAmount = formattedAmount;
+              baseTx.inCurrency = token;
             }
             if (scr.sender === walletAddress && formattedAmount !== '0') {
-              taxRelevantTransactions.push({
-                timestamp: tx.timestamp,
-                function: tx.function || 'N/A',
-                txHash: tx.txHash,
-                fee: tx.fee || '0',
-                inAmount: '0',
-                inCurrency: 'EGLD',
-                outAmount: formattedAmount,
-                outCurrency: token
-              });
+              baseTx.outAmount = formattedAmount;
+              baseTx.outCurrency = token;
             }
           } catch (err) {
             console.warn(`Failed to parse smart contract result: ${err.message}`);
@@ -151,19 +144,13 @@ app.post('/fetch-transactions', async (req, res) => {
       }
 
       // wrap EGLD fallback
-      if (tx.value && tx.value !== '0') {
+      if (tx.value && tx.value !== '0' && baseTx.outAmount === '0') {
         const formattedEgld = new BigNumber(tx.value.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed(18);
-        taxRelevantTransactions.push({
-          timestamp: tx.timestamp,
-          function: tx.function || 'N/A',
-          txHash: tx.txHash,
-          fee: tx.fee || '0',
-          inAmount: '0',
-          inCurrency: 'RIDE',
-          outAmount: formattedEgld,
-          outCurrency: 'EGLD'
-        });
+        baseTx.outAmount = formattedEgld;
+        baseTx.outCurrency = 'EGLD';
       }
+
+      taxRelevantTransactions.push(baseTx);
     }
 
     res.json({ allTransactions, taxRelevantTransactions });
