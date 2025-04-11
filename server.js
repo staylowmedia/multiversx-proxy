@@ -128,10 +128,11 @@ app.post('/fetch-transactions', async (req, res) => {
           const parts = decodedData.split('@');
           const callType = parts[0].toLowerCase();
 
-          if ((callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') && parts.length >= 3) {
+          if ((callType === 'esdttransfer' || callType === 'esdtnfttransfer' || callType === 'multiesdtnfttransfer') && parts.length >= 3) {
             try {
               const token = decodeHexToString(parts[1]);
-              const amount = decodeHexToBigInt(parts[2]);
+              const amountHex = parts[3] || parts[2];
+              const amount = decodeHexToBigInt(amountHex);
               const decimals = await fetchTokenDecimals(token);
               const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
 
