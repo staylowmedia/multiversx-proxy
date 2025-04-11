@@ -1,4 +1,4 @@
-// server.js (support multiple in/out tokens as separate rows)
+// server.js (EGLD wrap fix – keep on same line if possible)
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -78,8 +78,7 @@ app.post('/fetch-transactions', async (req, res) => {
       const knownDecimals = {
         'EGLD': 18,
         'WEGLD-bd4d79': 18,
-        'MEX-43535633537': 18,
-        'XMEX-4553434d4558': 18
+        'MEX-43535633537': 18
       };
       if (knownDecimals[tokenIdentifier]) return knownDecimals[tokenIdentifier];
       if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
@@ -102,7 +101,11 @@ app.post('/fetch-transactions', async (req, res) => {
         timestamp: tx.timestamp,
         function: tx.function || 'N/A',
         txHash: tx.txHash,
-        fee: tx.fee || '0'
+        fee: tx.fee || '0',
+        inAmount: '0',
+        inCurrency: 'EGLD',
+        outAmount: '0',
+        outCurrency: 'EGLD'
       };
 
       try {
@@ -126,28 +129,30 @@ app.post('/fetch-transactions', async (req, res) => {
               const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
 
               const isReceiver = (scr.receiver?.toLowerCase() === walletAddress.toLowerCase()) ||
-                                 (scr.originalReceiver?.toLowerCase() === walletAddress.toLowerCase()) ||
-                                 (decodedData.startsWith('ESDTTransfer') && detailed.data.receiver === walletAddress);
+                                 (scr.originalReceiver?.toLowerCase() === walletAddress.toLowerCase());
 
-              const txClone = { ...baseTx };
               if (isReceiver && formattedAmount !== '0') {
-                txClone.inAmount = formattedAmount;
-                txClone.inCurrency = token;
-                txClone.outAmount = '0';
-                txClone.outCurrency = 'EGLD';
-                taxRelevantTransactions.push(txClone);
+                baseTx.inAmount = formattedAmount;
+                baseTx.inCurrency = token;
               } else if (scr.sender === walletAddress && formattedAmount !== '0') {
-                txClone.outAmount = formattedAmount;
-                txClone.outCurrency = token;
-                txClone.inAmount = '0';
-                txClone.inCurrency = 'EGLD';
-                taxRelevantTransactions.push(txClone);
+                baseTx.outAmount = formattedAmount;
+                baseTx.outCurrency = token;
               }
             } catch (err) {
               console.warn(`Failed to parse smart contract result: ${err.message}`);
             }
           }
         }
+
+        // Fyll ut EGLD-verdi hvis relevant (wrap-egld)
+        if (tx.value && tx.value !== '0' && baseTx.outAmount === '0') {
+          const formattedEgld = new BigNumber(tx.value.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed(18);
+          baseTx.outAmount = formattedEgld;
+          baseTx.outCurrency = 'EGLD';
+        }
+
+        taxRelevantTransactions.push(baseTx);
+
       } catch (error) {
         console.warn(`Could not fetch SCResults for ${tx.txHash}:`, error.response?.data || error.message);
       }
