@@ -242,9 +242,14 @@ app.post('/fetch-transactions', async (req, res) => {
         });
 
         for (const scr of scResults) {
-          if (!scr.data || !scr.data.includes('@')) continue;
+          console.log(`Entering scResult loop for tx ${tx.txHash}, scr:`, scr);
+          if (!scr.data || !scr.data.includes('@')) {
+            console.log(`Skipping scResult for tx ${tx.txHash}: No data or no @ symbol`);
+            continue;
+          }
           const parts = scr.data.split('@');
-          const callType = parts[0].toLowerCase();
+          console.log(`Split data for tx ${tx.txHash}: parts=${parts}`);
+          const callType = decodeBase64ToString(parts[0]).toLowerCase();
           console.log(`Processing scResult for tx ${tx.txHash}: callType=${callType}`);
 
           if (callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') {
