@@ -128,22 +128,22 @@ app.post('/fetch-transactions', async (req, res) => {
     });
 
     const fetchTokenDecimals = async (tokenIdentifier) => {
-      if (tokenIdentifier === 'EGLD') {
-        console.log(`Token ${tokenIdentifier} has 18 decimals (hardcoded)`);
-        return 18;
+      const knownDecimals = {
+        'EGLD': 18,
+        'WEGLD-bd4d79': 18,
+        'MEX-43535633537': 18
+      };
+
+      if (knownDecimals[tokenIdentifier]) {
+        console.log(`Token ${tokenIdentifier} has ${knownDecimals[tokenIdentifier]} decimals (hardcoded)`);
+        return knownDecimals[tokenIdentifier];
       }
-      if (tokenIdentifier === 'WEGLD-bd4d79') {
-        console.log(`Token ${tokenIdentifier} has 18 decimals (hardcoded)`);
-        return 18;
-      }
-      if (tokenIdentifier === 'MEX-43535633537') {
-        console.log(`Token ${tokenIdentifier} has 18 decimals (hardcoded)`);
-        return 18;
-      }
+
       if (tokenDecimalsCache[tokenIdentifier]) {
         console.log(`Token ${tokenIdentifier} has ${tokenDecimalsCache[tokenIdentifier]} decimals (cached)`);
         return tokenDecimalsCache[tokenIdentifier];
       }
+
       try {
         const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
         const decimals = response.data.decimals || 18;
@@ -233,8 +233,15 @@ app.post('/fetch-transactions', async (req, res) => {
       // Håndter smart contract-resultater
       try {
         const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-        const scResults = detailed.data.results || [];
+        let scResults = detailed.data.results || [];
         console.log(`Smart contract results for tx ${tx.txHash}:`, scResults);
+
+        // Sorter scResults slik at ESDTTransfer behandles sist
+        scResults.sort((a, b) => {
+          const aIsEsdt = a.data && a.data.startsWith('RVNEVFRyYW5zZmVy') ? 1 : 0;
+          const bIsEsdt = b.data && b.data.startsWith('RVNEVFRyYW5zZmVy') ? 1 : 0;
+          return aIsEsdt - bIsEsdt;
+        });
 
         for (const scr of scResults) {
           if (!scr.data || !scr.data.includes('@')) continue;
