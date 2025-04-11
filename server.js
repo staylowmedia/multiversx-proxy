@@ -45,13 +45,14 @@ app.post('/fetch-transactions', async (req, res) => {
   let tokenDecimalsCache = {};
 
   try {
+    console.log(`📡 Verifying account ${walletAddress}`);
     await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
 
     // Fetch transactions
     const pageSize = 500;
     let fromIndex = 0;
 
-    while (fromIndex + pageSize <= 10000) {
+    while (true) {
       const params = {
         after: startTimestamp,
         before: endTimestamp,
@@ -59,58 +60,43 @@ app.post('/fetch-transactions', async (req, res) => {
         order: 'asc',
         from: fromIndex
       };
-      const cacheKey = `transactions_${walletAddress}_${fromIndex}_${startTimestamp}_${endTimestamp}`;
-      let transactions = cache.get(cacheKey);
 
-      if (!transactions) {
-        const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
-        transactions = response.data;
-        cache.set(cacheKey, transactions);
-      }
+      const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
+      const data = response.data;
 
-      if (transactions && transactions.length > 0) {
-        allTransactions = allTransactions.concat(transactions);
-      }
+      console.log(`📥 Fetched ${data.length} transactions from index ${fromIndex}`);
+      if (data.length === 0) break;
 
-      if (!transactions || transactions.length < pageSize) break;
+      allTransactions = allTransactions.concat(data);
+      if (data.length < pageSize) break;
+
       fromIndex += pageSize;
       await delay(500);
     }
 
-    // Fetch transfers using `start` parameter
+    // Fetch transfers (no from/to timestamps!)
     let transferIndex = 0;
-    const maxTransfersPerBatch = 500;
-
     while (true) {
       const params = {
         start: transferIndex,
-        size: maxTransfersPerBatch,
+        size: pageSize,
         order: 'asc'
       };
-      const cacheKey = `transfers_${walletAddress}_${transferIndex}`;
-      let batch = cache.get(cacheKey);
 
-      if (!batch) {
-        try {
-          const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, { params });
-          batch = response.data;
-          cache.set(cacheKey, batch);
-        } catch (error) {
-          console.error(`Transfer fetch failed at index ${transferIndex}:`, error.response?.data || error.message);
-          break;
-        }
-      }
+      const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, { params });
+      const batch = response.data;
 
-      if (batch && batch.length > 0) {
-        transfers = transfers.concat(batch);
-      }
+      console.log(`🔄 Fetched ${batch.length} transfers from index ${transferIndex}`);
+      if (batch.length === 0) break;
 
-      if (!batch || batch.length < maxTransfersPerBatch) break;
-      transferIndex += maxTransfersPerBatch;
+      transfers = transfers.concat(batch);
+      if (batch.length < pageSize) break;
+
+      transferIndex += pageSize;
       await delay(500);
     }
 
-    // Define tax-relevant functions
+    // Filter relevant transactions
     const taxRelevantFunctions = [
       'claimrewards', 'claim', 'claimrewardsproxy', 'redelegaterewards',
       'swaptokensfixedinput', 'swaptokensfixedoutput', 'multipairswap',
@@ -127,37 +113,30 @@ app.post('/fetch-transactions', async (req, res) => {
       return withinDate && (hasValue || taxRelevantFunctions.includes(func));
     });
 
-    // Helper for token decimals
     const fetchTokenDecimals = async (tokenIdentifier) => {
       if (tokenIdentifier === 'EGLD') return 18;
       if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
 
-      const cacheKey = `tokenDecimals_${tokenIdentifier}`;
-      let decimals = cache.get(cacheKey);
-      if (!decimals) {
-        try {
-          const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
-          decimals = response.data.decimals || 18;
-          cache.set(cacheKey, decimals);
-        } catch {
-          decimals = 18;
-        }
+      try {
+        const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
+        const decimals = response.data.decimals || 18;
+        tokenDecimalsCache[tokenIdentifier] = decimals;
+        return decimals;
+      } catch {
+        return 18;
       }
-      tokenDecimalsCache[tokenIdentifier] = decimals;
-      return decimals;
     };
 
-    // Attach transfer values to transactions
     for (let tx of taxRelevantTransactions) {
       tx.inAmount = '0';
       tx.inCurrency = 'EGLD';
       tx.outAmount = '0';
       tx.outCurrency = 'EGLD';
 
-      const relatedTransfers = transfers.filter(t => t.txHash === tx.txHash);
+      const related = transfers.filter(t => t.txHash === tx.txHash);
 
-      const inTransfer = relatedTransfers.find(t => t.receiver === walletAddress);
-      const outTransfer = relatedTransfers.find(t => t.sender === walletAddress);
+      const inTransfer = related.find(t => t.receiver === walletAddress);
+      const outTransfer = related.find(t => t.sender === walletAddress);
 
       if (inTransfer) {
         const decimals = await fetchTokenDecimals(inTransfer.identifier);
@@ -175,10 +154,8 @@ app.post('/fetch-transactions', async (req, res) => {
         if (BigInt(tx.value || 0) > 0) {
           if (tx.sender === walletAddress) {
             tx.outAmount = (BigInt(tx.value) / BigInt(10 ** 18)).toString();
-            tx.outCurrency = 'EGLD';
           } else if (tx.receiver === walletAddress) {
             tx.inAmount = (BigInt(tx.value) / BigInt(10 ** 18)).toString();
-            tx.inCurrency = 'EGLD';
           }
         }
       }
@@ -187,12 +164,12 @@ app.post('/fetch-transactions', async (req, res) => {
     res.json({ allTransactions, taxRelevantTransactions });
 
   } catch (error) {
-    console.error('Error in fetch-transactions:', error);
+    console.error('❌ Error in fetch-transactions:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Proxy server running on port ${PORT}`);
+  console.log(`🚀 Proxy server running on port ${PORT}`);
 });
