@@ -182,7 +182,9 @@ app.post('/fetch-transactions', async (req, res) => {
               const decimals = await fetchTokenDecimals(token);
               const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
 
-              if (scr.receiver === walletAddress && formattedAmount !== '0') {
+              const isReceiver = scr.receiver === walletAddress || scr.originalReceiver === walletAddress;
+
+              if (isReceiver && formattedAmount !== '0') {
                 if (tx.inCurrency === 'EGLD' || tx.inAmount === '0') {
                   tx.inAmount = formattedAmount;
                   tx.inCurrency = token;
