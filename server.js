@@ -17,6 +17,14 @@ const validateWalletAddress = (address) => {
   return addressPattern.test(address);
 };
 
+function decodeHexToString(hex) {
+  return Buffer.from(hex, 'hex').toString();
+}
+
+function decodeHexToBigInt(hex) {
+  return BigInt(`0x${hex}`);
+}
+
 app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate } = req.body;
 
@@ -71,7 +79,7 @@ app.post('/fetch-transactions', async (req, res) => {
     const SECONDS_IN_DAY = 86400;
     for (let ts = startTimestamp; ts < endTimestamp; ts += SECONDS_IN_DAY) {
       const chunkStart = ts;
-      const chunkEnd = Math.min(ts + SECONDS_IN_DAY - 1, endTimestamp);
+      const chunkEnd = Math.min(ts + 86398, endTimestamp);
       try {
         const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, {
           params: {
@@ -129,52 +137,49 @@ app.post('/fetch-transactions', async (req, res) => {
       const inTransfer = related.find(t => t.receiver === walletAddress);
       const outTransfer = related.find(t => t.sender === walletAddress);
 
-      if (inTransfer) {
+      if (inTransfer?.identifier && inTransfer.value) {
         const decimals = await fetchTokenDecimals(inTransfer.identifier);
         tx.inAmount = (BigInt(inTransfer.value) / BigInt(10 ** decimals)).toString();
         tx.inCurrency = inTransfer.identifier;
       }
 
-      if (outTransfer) {
+      if (outTransfer?.identifier && outTransfer.value) {
         const decimals = await fetchTokenDecimals(outTransfer.identifier);
         tx.outAmount = (BigInt(outTransfer.value) / BigInt(10 ** decimals)).toString();
         tx.outCurrency = outTransfer.identifier;
       }
 
-      if ((tx.inAmount === '0' && tx.outAmount === '0') || ['swaptokensfixedinput', 'swaptokensfixedoutput', 'wrapegld', 'unwrapegld'].includes(tx.function?.toLowerCase())) {
-        try {
-          const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-          const operations = detailed.data.operations || [];
-          const scResults = detailed.data.smartContractResults || [];
+      try {
+        const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
+        const scResults = detailed.data.smartContractResults || [];
 
-          for (const op of operations) {
-            if (op.sender === walletAddress) {
-              const decimals = await fetchTokenDecimals(op.identifier);
-              tx.outAmount = (BigInt(op.value) / BigInt(10 ** decimals)).toString();
-              tx.outCurrency = op.identifier;
-            }
-            if (op.receiver === walletAddress) {
-              const decimals = await fetchTokenDecimals(op.identifier);
-              tx.inAmount = (BigInt(op.value) / BigInt(10 ** decimals)).toString();
-              tx.inCurrency = op.identifier;
-            }
-          }
+        for (const scr of scResults) {
+          if (!scr.data) continue;
 
-          for (const scr of scResults) {
-            if (scr.receiver === walletAddress && scr.identifier) {
-              const decimals = await fetchTokenDecimals(scr.identifier);
-              tx.inAmount = (BigInt(scr.value) / BigInt(10 ** decimals)).toString();
-              tx.inCurrency = scr.identifier;
+          try {
+            const parts = scr.data.split('@');
+            if (parts.length >= 3 && parts[0].toLowerCase() === 'esdttransfer') {
+              const tokenHex = parts[1];
+              const amountHex = parts[2];
+              const token = decodeHexToString(tokenHex);
+              const amount = decodeHexToBigInt(amountHex);
+              const decimals = await fetchTokenDecimals(token);
+
+              if (scr.receiver === walletAddress) {
+                tx.inAmount = (amount / BigInt(10 ** decimals)).toString();
+                tx.inCurrency = token;
+              }
+              if (scr.sender === walletAddress) {
+                tx.outAmount = (amount / BigInt(10 ** decimals)).toString();
+                tx.outCurrency = token;
+              }
             }
-            if (scr.sender === walletAddress && scr.identifier) {
-              const decimals = await fetchTokenDecimals(scr.identifier);
-              tx.outAmount = (BigInt(scr.value) / BigInt(10 ** decimals)).toString();
-              tx.outCurrency = scr.identifier;
-            }
+          } catch (decodeError) {
+            console.warn(`⚠️ Failed to decode smart contract result data for ${tx.txHash}:`, decodeError.message);
           }
-        } catch (error) {
-          console.warn(`⚠️ Could not fetch operations for ${tx.txHash}:`, error.response?.data || error.message);
         }
+      } catch (error) {
+        console.warn(`⚠️ Could not fetch operations for ${tx.txHash}:`, error.response?.data || error.message);
       }
     }
 
