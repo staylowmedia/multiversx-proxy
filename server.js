@@ -131,7 +131,9 @@ app.post('/fetch-transactions', async (req, res) => {
       reportProgress(clientId, `🔍 Behandler ${i + 1} av ${allTransactions.length} transaksjoner...`);
       const func = tx.function?.toLowerCase() || '';
       uniqueFunctions.add(func);
-      console.log(`Checking tx ${tx.txHash}: function=${func}, value=${tx.value}, receiver=${tx.receiver}`);
+      console.log(`Checking tx ${tx.txHash}: function=${func}, value=${tx.value}, receiver=${tx.receiver}, sender=${tx.sender}`);
+
+      let hasAddedEGLD = false;
 
       // Håndter direkte EGLD-overføringer
       if (tx.receiver === walletAddress && tx.value && BigInt(tx.value) > 0) {
@@ -148,12 +150,16 @@ app.post('/fetch-transactions', async (req, res) => {
           fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
           txHash: tx.txHash
         });
-        continue;
+        hasAddedEGLD = true;
       }
 
-      const isTaxRelevant = taxRelevantFunctions.includes(func) || !func;
-      if (!isTaxRelevant) {
-        console.log(`⚠️ Skipping tx ${tx.txHash}: function ${func} not tax-relevant`);
+      // Sjekk om transaksjonen er skatterelevant eller en swap
+      const isTaxRelevant = taxRelevantFunctions.includes(func) || 
+                           !func || 
+                           tx.action?.category === 'mex' || 
+                           tx.data?.startsWith('RVNEVFRyYW5zZmVy'); // ESDTTransfer
+      if (!isTaxRelevant && !hasAddedEGLD) {
+        console.log(`⚠️ Skipping tx ${tx.txHash}: function ${func} not tax-relevant, no EGLD transfer`);
         continue;
       }
 
@@ -193,103 +199,105 @@ app.post('/fetch-transactions', async (req, res) => {
               inCurrency: token,
               outAmount: '0',
               outCurrency: 'EGLD',
-              fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+              fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
               txHash: tx.txHash
             });
           }
-        } else {
-          // Prøv logs.events
-          const esdtEvents = logs.events?.filter(event => 
-            ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier)
-          ) || [];
+        }
 
-          if (esdtEvents.length > 0) {
-            for (const [index, event] of esdtEvents.entries()) {
-              console.log(`Processing event for tx ${tx.txHash}:`, JSON.stringify(event, null, 2));
-              const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
-              const amountHex = event.topics?.[2] || '0';
-              console.log(`Raw topics for event:`, event.topics);
+        // Prøv logs.events
+        const esdtEvents = logs.events?.filter(event => 
+          ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier)
+        ) || [];
 
-              let amount = BigInt(0);
-              try {
-                amount = decodeHexToBigInt(decodeBase64ToHex(amountHex));
-              } catch (err) {
-                console.warn(`⚠️ Failed to decode amount for tx ${tx.txHash}:`, err.message);
-                continue;
-              }
-              if (amount <= BigInt(0)) {
-                console.warn(`⚠️ Null or negative amount for token ${token} in tx ${tx.txHash}`);
-                continue;
-              }
+        if (esdtEvents.length > 0) {
+          for (const [index, event] of esdtEvents.entries()) {
+            console.log(`Processing event for tx ${tx.txHash}:`, JSON.stringify(event, null, 2));
+            const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
+            const amountHex = event.topics?.[2] || '0';
+            console.log(`Raw topics for event:`, event.topics);
 
-              const decimals = await getTokenDecimals(token, tokenDecimalsCache);
-              const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
-
-              taxRelevantTransactions.push({
-                timestamp: tx.timestamp,
-                function: tx.function || 'transfer',
-                inAmount: formatted,
-                inCurrency: token,
-                _
-                outAmount: '0',
-                outCurrency: 'EGLD',
-                fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
-                txHash: tx.txHash
-              });
+            let amount = BigInt(0);
+            try {
+              amount = decodeHexToBigInt(decodeBase64ToHex(amountHex));
+            } catch (err) {
+              console.warn(`⚠️ Failed to decode amount for tx ${tx.txHash}:`, err.message);
+              continue;
             }
-          } else {
-            // Prøv scResults
-            const esdtResults = scResults.filter(r => 
-              r.receiver === walletAddress && 
-              r.data && 
-              (r.data.startsWith('RVNEVFRyYW5zZmVy') || r.function === 'ESDTTransfer' || r.function === 'MultiESDTNFTTransfer')
-            );
-
-            if (esdtResults.length > 0) {
-              for (const [index, result] of esdtResults.entries()) {
-                const decodedData = decodeBase64ToString(result.data);
-                const parts = decodedData.split('@');
-                if (parts.length < 3) {
-                  console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
-                  continue;
-                }
-
-                const tokenHex = parts[1];
-                const amountHex = parts[2];
-                const token = decodeHexToString(tokenHex);
-                const amount = decodeHexToBigInt(amountHex);
-                if (amount <= BigInt(0)) {
-                  console.warn(`⚠️ Null or negative amount for token ${token} in tx ${tx.txHash}`);
-                  continue;
-                }
-                const decimals = await getTokenDecimals(token, tokenDecimalsCache);
-                const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
-
-                taxRelevantTransactions.push({
-                  timestamp: tx.timestamp,
-                  function: tx.function || 'transfer',
-                  inAmount: formatted,
-                  inCurrency: token,
-                  outAmount: '0',
-                  outCurrency: 'EGLD',
-                  fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
-                  txHash: tx.txHash
-                });
-              }
-            } else {
-              console.warn(`⚠️ No token transfers found for tx ${tx.txHash}, using fallback`);
-              taxRelevantTransactions.push({
-                timestamp: tx.timestamp,
-                function: tx.function || 'unknown',
-                inAmount: '0',
-                inCurrency: 'EGLD',
-                outAmount: '0',
-                outCurrency: 'EGLD',
-                fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-                txHash: tx.txHash
-              });
+            if (amount <= BigInt(0)) {
+              console.warn(`⚠️ Null or negative amount for token ${token} in tx ${tx.txHash}`);
+              continue;
             }
+
+            const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+            const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: tx.function || 'transfer',
+              inAmount: formatted,
+              inCurrency: token,
+              outAmount: '0',
+              outCurrency: 'EGLD',
+              fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+              txHash: tx.txHash
+            });
           }
+        }
+
+        // Prøv scResults
+        const esdtResults = scResults.filter(r => 
+          r.receiver === walletAddress && 
+          r.data && 
+          (r.data.startsWith('RVNEVFRyYW5zZmVy') || r.function === 'ESDTTransfer' || r.function === 'MultiESDTNFTTransfer')
+        );
+
+        if (esdtResults.length > 0) {
+          for (const [index, result] of esdtResults.entries()) {
+            const decodedData = decodeBase64ToString(result.data);
+            const parts = decodedData.split('@');
+            if (parts.length < 3) {
+              console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+              continue;
+            }
+
+            const tokenHex = parts[1];
+            const amountHex = parts[2];
+            const token = decodeHexToString(tokenHex);
+            const amount = decodeHexToBigInt(amountHex);
+            if (amount <= BigInt(0)) {
+              console.warn(`⚠️ Null or negative amount for token ${token} in tx ${tx.txHash}`);
+              continue;
+            }
+            const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+            const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: tx.function || 'transfer',
+              inAmount: formatted,
+              inCurrency: token,
+              outAmount: '0',
+              outCurrency: 'EGLD',
+              fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+              txHash: tx.txHash
+            });
+          }
+        }
+
+        // Fallback kun hvis ingen overføringer er funnet
+        if (!hasAddedEGLD && tokenTransfers.length === 0 && esdtEvents.length === 0 && esdtResults.length === 0) {
+          console.warn(`⚠️ No transfers found for tx ${tx.txHash}, using fallback`);
+          taxRelevantTransactions.push({
+            timestamp: tx.timestamp,
+            function: tx.function || 'unknown',
+            inAmount: '0',
+            inCurrency: 'EGLD',
+            outAmount: '0',
+            outCurrency: 'EGLD',
+            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+            txHash: tx.txHash
+          });
         }
       } catch (err) {
         console.warn(`⚠️ Kunne ikke hente detaljer for tx ${tx.txHash}:`, err.message);
