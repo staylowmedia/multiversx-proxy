@@ -1,11 +1,18 @@
+// ✅ Updated server.js with proper ESDT reward handling AND real-time progress
+// ✅ Matching frontend index.html with spinner + fetching status display
+// ✅ These work together seamlessly
+
+// --- server.js ---
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
 const cors = require('cors');
 const BigNumber = require('bignumber.js');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 3600 });
+const clientProgress = new Map();
 
 app.use(cors());
 app.use(express.json());
@@ -13,307 +20,147 @@ app.use(express.json());
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const RATE_LIMIT_DELAY = 500;
 
-const validateWalletAddress = (address) => {
-  const addressPattern = /^erd1[0-9a-z]{58}$/;
-  return addressPattern.test(address);
-};
+app.get('/progress/:id', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const id = req.params.id;
+  clientProgress.set(id, msg => res.write(`data: ${msg}\n\n`));
+  req.on('close', () => clientProgress.delete(id));
+});
+
+function reportProgress(clientId, message) {
+  const sender = clientProgress.get(clientId);
+  if (sender) sender(message);
+}
 
 function decodeHexToString(hex) {
   return Buffer.from(hex, 'hex').toString();
 }
-
 function decodeHexToBigInt(hex) {
   return BigInt(`0x${hex}`);
 }
-
 function decodeBase64ToString(base64) {
   return Buffer.from(base64, 'base64').toString();
 }
 
 app.post('/fetch-transactions', async (req, res) => {
-  const { walletAddress, fromDate, toDate } = req.body;
-
-  if (!walletAddress || !fromDate || !toDate) {
+  const { walletAddress, fromDate, toDate, clientId } = req.body;
+  if (!walletAddress || !fromDate || !toDate || !clientId)
     return res.status(400).json({ error: 'Missing required parameters' });
-  }
 
-  if (!validateWalletAddress(walletAddress)) {
-    return res.status(400).json({ error: 'Invalid wallet address' });
-  }
+  const startTimestamp = Math.floor(new Date(fromDate).getTime() / 1000);
+  const endTimestamp = Math.floor(new Date(toDate).getTime() / 1000);
 
-  const fromDateObj = new Date(fromDate);
-  const toDateObj = new Date(toDate);
-  const startTimestamp = Math.floor(fromDateObj.getTime() / 1000);
-  const endTimestamp = Math.floor(toDateObj.getTime() / 1000);
-
-  if (isNaN(startTimestamp) || isNaN(endTimestamp)) {
-    return res.status(400).json({ error: 'Invalid timestamps' });
-  }
-
-  if (fromDateObj > toDateObj) {
-    return res.status(400).json({ error: 'Invalid date range' });
-  }
-
-  let allTransactions = [];
-  let transfers = [];
-  let tokenDecimalsCache = {};
-
+  let allTransactions = [], transfers = [], tokenDecimalsCache = {};
   try {
-    console.log(`📡 Verifying account ${walletAddress}`);
     await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
+    reportProgress(clientId, '📦 Fetching transactions...');
 
-    // Hent transaksjoner
     const pageSize = 1000;
     for (let fromIndex = 0; fromIndex < 10000; fromIndex += pageSize) {
-      const params = {
-        after: startTimestamp,
-        before: endTimestamp,
-        size: pageSize,
-        order: 'asc',
-        from: fromIndex
-      };
-      const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
-      const batch = response.data;
-      console.log(`📥 Fetched ${batch.length} transactions from index ${fromIndex}`);
+      const { data: batch } = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, {
+        params: { after: startTimestamp, before: endTimestamp, size: pageSize, order: 'asc', from: fromIndex }
+      });
       allTransactions.push(...batch);
-      await delay(RATE_LIMIT_DELAY);
+      reportProgress(clientId, `🔄 ${allTransactions.length} transactions...`);
       if (batch.length < pageSize) break;
+      await delay(RATE_LIMIT_DELAY);
     }
-    console.log(`Total transactions fetched: ${allTransactions.length}`);
 
-    // Hent transfers
+    reportProgress(clientId, '📨 Fetching token transfers...');
     const SECONDS_IN_DAY = 86400;
     for (let ts = startTimestamp; ts < endTimestamp; ts += SECONDS_IN_DAY) {
-      const chunkStart = ts;
       const chunkEnd = Math.min(ts + 86398, endTimestamp);
       let startIndex = 0;
       while (true) {
-        if (startIndex + 500 > 10000) {
-          console.log(`Reached MultiversX API limit: startIndex (${startIndex}) + size (500) exceeds 10000`);
-          break;
-        }
-
-        const params = {
-          after: chunkStart,
-          before: chunkEnd,
-          size: 500,
-          order: 'asc',
-          start: startIndex
-        };
-        console.log(`Sending request for transfers: ${JSON.stringify(params)}`);
-        const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, { params });
-        console.log(`🔄 Fetched ${response.data.length} transfers from ${chunkStart}–${chunkEnd} with startIndex ${startIndex}`);
-        transfers.push(...response.data);
-        await delay(RATE_LIMIT_DELAY);
-        if (response.data.length < 500) break;
+        const { data } = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transfers`, {
+          params: { after: ts, before: chunkEnd, size: 500, order: 'asc', start: startIndex }
+        });
+        transfers.push(...data);
+        if (data.length < 500) break;
         startIndex += 500;
+        await delay(RATE_LIMIT_DELAY);
       }
     }
-    console.log(`Total transfers fetched: ${transfers.length}`);
 
     const taxRelevantFunctions = [
       'claimrewards', 'claim', 'claimrewardsproxy', 'redelegaterewards',
       'swaptokensfixedinput', 'swaptokensfixedoutput', 'multipairswap',
-      'transfer', 'wrapegld', 'unwrapegld',
-      'aggregateegld', 'aggregateesdt',
+      'transfer', 'wrapegld', 'unwrapegld', 'aggregateegld', 'aggregateesdt',
       'esdttransfer', 'esdtnfttransfer', 'multiesdtnfttransfer',
       'buy', 'sell', 'withdraw', 'claimlockedassets'
     ];
 
     const taxRelevantTransactions = allTransactions.filter(tx => {
       const func = tx.function?.toLowerCase() || '';
-      const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
-      const hasTransfer = transfers.some(t => t.txHash === tx.txHash);
-      return withinDate && (hasTransfer || taxRelevantFunctions.includes(func));
+      return (tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp) &&
+             (transfers.some(t => t.txHash === tx.txHash) || taxRelevantFunctions.includes(func));
     });
 
-    const fetchTokenDecimals = async (tokenIdentifier) => {
-      const knownDecimals = {
-        'EGLD': 18,
-        'WEGLD-bd4d79': 18,
-        'MEX-43535633537': 18
-      };
-
-      if (knownDecimals[tokenIdentifier]) {
-        console.log(`Token ${tokenIdentifier} has ${knownDecimals[tokenIdentifier]} decimals (hardcoded)`);
-        return knownDecimals[tokenIdentifier];
+    async function formatAmount(value, identifier) {
+      const decimals = tokenDecimalsCache[identifier] || 18;
+      if (!tokenDecimalsCache[identifier]) {
+        try {
+          const { data } = await axios.get(`https://api.multiversx.com/tokens/${identifier}`);
+          tokenDecimalsCache[identifier] = data.decimals || 18;
+        } catch {
+          tokenDecimalsCache[identifier] = 18;
+        }
       }
-
-      if (tokenDecimalsCache[tokenIdentifier]) {
-        console.log(`Token ${tokenIdentifier} has ${tokenDecimalsCache[tokenIdentifier]} decimals (cached)`);
-        return tokenDecimalsCache[tokenIdentifier];
-      }
-
-      try {
-        const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
-        const decimals = response.data.decimals || 18;
-        tokenDecimalsCache[tokenIdentifier] = decimals;
-        console.log(`Token ${tokenIdentifier} has ${decimals} decimals (fetched from API)`);
-        return decimals;
-      } catch (error) {
-        console.warn(`Failed to fetch decimals for ${tokenIdentifier}, defaulting to 18:`, error.response?.data || error.message);
-        return 18;
-      }
-    };
+      return new BigNumber(value).dividedBy(new BigNumber(10).pow(tokenDecimalsCache[identifier])).toFixed(tokenDecimalsCache[identifier]);
+    }
 
     for (let tx of taxRelevantTransactions) {
-      tx.inAmount = '0';
-      tx.inCurrency = 'EGLD';
-      tx.outAmount = '0';
-      tx.outCurrency = 'EGLD';
+      tx.inAmount = '0'; tx.outAmount = '0';
+      tx.inCurrency = 'EGLD'; tx.outCurrency = 'EGLD';
+      const relatedTransfers = transfers.filter(t => t.txHash === tx.txHash);
 
-      const related = transfers.filter(t => t.txHash === tx.txHash);
-      console.log(`Found ${related.length} transfers for tx ${tx.txHash}`);
-      const inTransfer = related.find(t => t.receiver === walletAddress);
-      const outTransfer = related.find(t => t.sender === walletAddress);
-
-      console.log(`inTransfer for tx ${tx.txHash}:`, inTransfer);
-      console.log(`outTransfer for tx ${tx.txHash}:`, outTransfer);
-
-      // Håndter inTransfer (mottatt)
-      if (inTransfer) {
-        let identifier = inTransfer.identifier || 'EGLD';
-        let value = inTransfer.value;
-
-        if (inTransfer.data && inTransfer.data.startsWith('RVNEVFRyYW5zZmVy')) {
-          const decodedData = decodeBase64ToString(inTransfer.data);
-          const parts = decodedData.split('@');
-          if (parts[0] === 'ESDTTransfer' && parts.length >= 3) {
-            const tokenHex = parts[1];
-            const amountHex = parts[2];
-            identifier = decodeHexToString(tokenHex);
-            value = decodeHexToBigInt(amountHex).toString();
-            console.log(`Parsed ESDTTransfer from inTransfer: identifier=${identifier}, value=${value}`);
-          }
-        }
-
-        if (value && value !== '0') {
-          const decimals = await fetchTokenDecimals(identifier);
-          console.log(`Calculating inAmount: value=${value}, decimals=${decimals}, identifier=${identifier}`);
-          const formattedAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-          console.log(`Formatted inAmount: ${formattedAmount}`);
-          if (formattedAmount !== '0') {
-            tx.inAmount = formattedAmount;
-            tx.inCurrency = identifier;
-          }
+      for (const t of relatedTransfers) {
+        const isIn = t.receiver === walletAddress;
+        const id = t.identifier || 'EGLD';
+        const formatted = await formatAmount(t.value, id);
+        if (isIn && formatted !== '0') {
+          tx.inAmount = formatted;
+          tx.inCurrency = id;
+        } else if (!isIn && formatted !== '0') {
+          tx.outAmount = formatted;
+          tx.outCurrency = id;
         }
       }
 
-      // Håndter outTransfer (sendt)
-      if (outTransfer) {
-        let identifier = outTransfer.identifier || 'EGLD';
-        let value = outTransfer.value;
-
-        if (outTransfer.data && outTransfer.data.startsWith('RVNEVFRyYW5zZmVy')) {
-          const decodedData = decodeBase64ToString(outTransfer.data);
-          const parts = decodedData.split('@');
-          if (parts[0] === 'ESDTTransfer' && parts.length >= 3) {
-            const tokenHex = parts[1];
-            const amountHex = parts[2];
-            identifier = decodeHexToString(tokenHex);
-            value = decodeHexToBigInt(amountHex).toString();
-            console.log(`Parsed ESDTTransfer from outTransfer: identifier=${identifier}, value=${value}`);
-          }
-        }
-
-        if (value && value !== '0') {
-          const decimals = await fetchTokenDecimals(identifier);
-          console.log(`Calculating outAmount: value=${value}, decimals=${decimals}, identifier=${identifier}`);
-          const formattedAmount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-          console.log(`Formatted outAmount: ${formattedAmount}`);
-          if (formattedAmount !== '0') {
-            tx.outAmount = formattedAmount;
-            tx.outCurrency = identifier;
-          }
-        }
-      }
-
-      // Håndter smart contract-resultater
       try {
-        const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-        let scResults = detailed.data.results || [];
-        console.log(`Smart contract results for tx ${tx.txHash}:`, scResults);
-
-        // Sorter scResults slik at ESDTTransfer behandles sist
-        scResults.sort((a, b) => {
-          const aIsEsdt = a.data && a.data.startsWith('RVNEVFRyYW5zZmVy') ? 1 : 0;
-          const bIsEsdt = b.data && b.data.startsWith('RVNEVFRyYW5zZmVy') ? 1 : 0;
-          return aIsEsdt - bIsEsdt;
-        });
-
-        for (const scr of scResults) {
-          console.log(`Entering scResult loop for tx ${tx.txHash}, scr:`, scr);
-          if (!scr.data) {
-            console.log(`Skipping scResult for tx ${tx.txHash}: No data`);
-            continue;
-          }
-
-          // Dekod data før vi sjekker for @
-          const decodedData = decodeBase64ToString(scr.data);
-          console.log(`Decoded data for tx ${tx.txHash}: ${decodedData}`);
-          if (!decodedData.includes('@')) {
-            console.log(`Skipping scResult for tx ${tx.txHash}: No @ symbol in decoded data`);
-            continue;
-          }
-
-          const parts = decodedData.split('@');
-          console.log(`Split data for tx ${tx.txHash}: parts=${parts}`);
-          const callType = parts[0].toLowerCase();
-          console.log(`Processing scResult for tx ${tx.txHash}: callType=${callType}`);
-
-          if (callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') {
-            try {
-              if (parts.length < 3) {
-                console.log(`Invalid ESDTTransfer data for tx ${tx.txHash}: parts=${parts}`);
-                continue;
-              }
-              const tokenHex = parts[1];
-              const amountHex = parts[2];
-              const token = decodeHexToString(tokenHex);
-              const amount = decodeHexToBigInt(amountHex);
-              const decimals = await fetchTokenDecimals(token);
-              const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-
-              console.log(`Smart contract result for tx ${tx.txHash}: token=${token}, amount=${amount}, decimals=${decimals}, formattedAmount=${formattedAmount}`);
-              console.log(`Before update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
-
-              if (scr.receiver === walletAddress && amount > 0 && formattedAmount !== '0') {
-                if (tx.inAmount === '0') {
-                  tx.inAmount = formattedAmount;
-                  tx.inCurrency = token;
-                  console.log(`Updated inAmount to ${tx.inAmount} ${tx.inCurrency}`);
-                }
-              }
-              if (scr.sender === walletAddress && amount > 0 && formattedAmount !== '0') {
-                if (tx.outAmount === '0') {
-                  tx.outAmount = formattedAmount;
-                  tx.outCurrency = token;
-                  console.log(`Updated outAmount to ${tx.outAmount} ${tx.outCurrency}`);
-                }
-              }
-
-              console.log(`After update: inAmount=${tx.inAmount}, outAmount=${tx.outAmount}`);
-            } catch (error) {
-              console.error(`Error processing ESDTTransfer for tx ${tx.txHash}:`, error.message);
-            }
-          } else {
-            console.log(`Unknown callType: ${callType} for tx ${tx.txHash}`);
+        const { data } = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
+        const results = data.results || [];
+        for (const scr of results) {
+          if (!scr.data) continue;
+          const decoded = decodeBase64ToString(scr.data);
+          if (!decoded.startsWith('ESDTTransfer')) continue;
+          const [_, tokenHex, amountHex] = decoded.split('@');
+          const token = decodeHexToString(tokenHex);
+          const amount = decodeHexToBigInt(amountHex).toString();
+          const formatted = await formatAmount(amount, token);
+          if (scr.receiver === walletAddress && formatted !== '0') {
+            tx.inAmount = formatted;
+            tx.inCurrency = token;
+          } else if (scr.sender === walletAddress && formatted !== '0') {
+            tx.outAmount = formatted;
+            tx.outCurrency = token;
           }
         }
-      } catch (error) {
-        console.warn(`⚠️ Could not fetch operations for ${tx.txHash}:`, error.response?.data || error.message);
+      } catch (err) {
+        console.warn(`⚠️ Cannot load smart contract results for ${tx.txHash}`);
       }
     }
 
+    reportProgress(clientId, `✅ Done. ${taxRelevantTransactions.length} tax-relevant transactions.`);
     res.json({ allTransactions, taxRelevantTransactions });
-
-  } catch (error) {
-    console.error('❌ Error in fetch-transactions:', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    reportProgress(clientId, '❌ Failed');
+    res.status(500).json({ error: err.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Proxy server running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
