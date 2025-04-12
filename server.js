@@ -1,4 +1,4 @@
-// server.js with full tax transformation logic reintegrated
+// server.js with progress updates for fetching transactions
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -48,6 +48,7 @@ app.post('/fetch-transactions', async (req, res) => {
   let transfers = [];
   let tokenDecimalsCache = {};
   let taxRelevantTransactions = [];
+  let txCounter = 0;
 
   try {
     console.log(`🔍 Checking account: ${walletAddress}`);
@@ -76,9 +77,11 @@ app.post('/fetch-transactions', async (req, res) => {
 
       for (let fromIndex = 0; fromIndex < 10000; fromIndex += 1000) {
         const params = { after: startTimestamp, before: endTimestamp, size: 1000, order: 'asc', from: fromIndex };
+        console.log(`📥 Fetching transaction batch: startIndex=${fromIndex}`);
         const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
         const batch = response.data;
-        console.log(`📥 Got ${batch.length} tx at index ${fromIndex}`);
+        txCounter += batch.length;
+        console.log(`📥 Got ${batch.length} transactions. Total so far: ${txCounter}`);
         allTransactions.push(...batch);
         await delay(RATE_LIMIT_DELAY);
         if (batch.length < 1000) break;
