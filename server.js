@@ -40,7 +40,6 @@ function decodeHexToBigInt(hex) { try { return BigInt(`0x${hex}`); } catch { ret
 function decodeBase64ToString(base64) { try { return Buffer.from(base64, 'base64').toString(); } catch { return ''; } }
 function decodeBase64ToHex(base64) { try { return Buffer.from(base64, 'base64').toString('hex'); } catch { return '0'; } }
 
-// Dedupliseringsfunksjon
 function deduplicateTransactions(transactions) {
   const seen = new Set();
   return transactions.filter(tx => {
@@ -77,7 +76,7 @@ async function getTokenDecimals(token, tokenDecimalsCache) {
     return decimals;
   } catch (err) {
     console.warn(`⚠️ Could not fetch decimals for ${token}:`, err.message);
-    return 18; // Fallback
+    return 18;
   }
 }
 
@@ -103,7 +102,7 @@ app.post('/fetch-transactions', async (req, res) => {
   }
 
   const cacheKey = `${walletAddress}:${fromDate}:${toDate}`;
-  cache.del(cacheKey); // Tøm cache
+  cache.del(cacheKey);
   const cached = cache.get(cacheKey);
   if (cached) {
     reportProgress(clientId, '✅ Hentet fra cache');
@@ -150,8 +149,8 @@ app.post('/fetch-transactions', async (req, res) => {
 
       let hasAddedEGLD = false;
 
-      // Håndter direkte EGLD-overføringer
-      if (tx.receiver === walletAddress && tx.value && BigInt(tx.value) > 0) {
+      // Håndter direkte EGLD-overføringer inn
+      if (tx.receiver === walletAddress && tx.value && BigInt(tx.value) > 0 && func !== 'wrapegld') {
         console.log(`Found EGLD transfer for tx ${tx.txHash}: ${tx.value} wei`);
         const amount = BigInt(tx.value);
         const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed();
@@ -168,7 +167,6 @@ app.post('/fetch-transactions', async (req, res) => {
         hasAddedEGLD = true;
       }
 
-      // Sjekk om transaksjonen er skatterelevant
       const isTaxRelevant = taxRelevantFunctions.includes(func) || 
                            !func || 
                            tx.action?.category === 'mex' || 
@@ -184,7 +182,6 @@ app.post('/fetch-transactions', async (req, res) => {
         const operations = detailed.data.operations || [];
         const logs = detailed.data.logs || { events: [] };
 
-        // Log for spesifikke transaksjoner
         if (['5a57c6e9fd0b748132f127e4acaffb3da7dbc8a3866cfc7265f1da87412a59f7', 
              '31634e93b069bd30c912476bf01f30886f750545fcaf0832971cfa1d428d8c65',
              '9ec040449bd204aa87bd84b2173444f78dada3ef48a16f2d2a93da66214e230e',
@@ -195,7 +192,7 @@ app.post('/fetch-transactions', async (req, res) => {
           console.log(`Full response for tx ${tx.txHash}:`, JSON.stringify(detailed.data, null, 2));
         }
 
-        // Håndter inn- og ut-overføringer fra operations
+        // Samle inn- og ut-overføringer
         let tokenTransfersIn = operations.filter(op => 
           op.type === 'esdt' && 
           op.receiver === walletAddress && 
@@ -208,7 +205,80 @@ app.post('/fetch-transactions', async (req, res) => {
           op.value && BigInt(op.value) > 0
         );
 
-        // Behandle inn-overføringer
+        // Spesifikk håndtering for wrapEgld
+        if (func === 'wrapegld' && tx.sender === walletAddress && tx.value && BigInt(tx.value) > 0) {
+          console.log(`Processing wrapEgld for tx ${tx.txHash}: EGLD out=${tx.value}`);
+          const egldAmount = BigInt(tx.value);
+          const egldFormatted = new BigNumber(egldAmount.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed();
+          const inOp = tokenTransfersIn.find(op => op.identifier === 'WEGLD-bd4d79');
+          let inAmount = '0', inCurrency = 'EGLD';
+
+          if (inOp) {
+            const amount = BigInt(inOp.value);
+            const decimals = await getTokenDecimals(inOp.identifier, tokenDecimalsCache);
+            inAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+            inCurrency = inOp.identifier;
+            tokenTransfersIn = tokenTransfersIn.filter(op => op !== inOp);
+          }
+
+          taxRelevantTransactions.push({
+            timestamp: tx.timestamp,
+            function: func,
+            inAmount,
+            inCurrency,
+            outAmount: egldFormatted,
+            outCurrency: 'EGLD',
+            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+            txHash: tx.txHash
+          });
+          continue; // Hopp over videre behandling
+        }
+
+        // Håndter swaps
+        if (['swap_tokens_fixed_input', 'swap_tokens_fixed_output', 'multipairswap'].includes(func)) {
+          console.log(`Processing swap for tx ${tx.txHash}: in=${JSON.stringify(tokenTransfersIn)}, out=${JSON.stringify(tokenTransfersOut)}`);
+          if (tokenTransfersIn.length > 0) {
+            // Velg den største inn-overføringen (unngå støv)
+            const primaryIn = tokenTransfersIn.reduce((max, op) => 
+              BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersIn[0]);
+            const inToken = primaryIn.identifier || 'UNKNOWN';
+            if (inToken === 'UNKNOWN') {
+              console.warn(`⚠️ Skipping swap with unknown in-token for tx ${tx.txHash}`);
+              continue;
+            }
+            const inAmountBig = BigInt(primaryIn.value);
+            const inDecimals = await getTokenDecimals(inToken, tokenDecimalsCache);
+            const inAmount = new BigNumber(inAmountBig.toString()).dividedBy(new BigNumber(10).pow(inDecimals)).toFixed();
+
+            let outAmount = '0', outCurrency = 'EGLD';
+            if (tokenTransfersOut.length > 0) {
+              // Velg den største ut-overføringen
+              const primaryOut = tokenTransfersOut.reduce((max, op) => 
+                BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersOut[0]);
+              const outToken = primaryOut.identifier || 'UNKNOWN';
+              if (outToken !== 'UNKNOWN') {
+                const outAmountBig = BigInt(primaryOut.value);
+                const outDecimals = await getTokenDecimals(outToken, tokenDecimalsCache);
+                outAmount = new BigNumber(outAmountBig.toString()).dividedBy(new BigNumber(10).pow(outDecimals)).toFixed();
+                outCurrency = outToken;
+              }
+            }
+
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: func,
+              inAmount,
+              inCurrency: inToken,
+              outAmount,
+              outCurrency,
+              fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+              txHash: tx.txHash
+            });
+            continue; // Hopp over videre behandling for swaps
+          }
+        }
+
+        // Behandle gjenværende inn-overføringer
         for (const [index, op] of tokenTransfersIn.entries()) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
@@ -219,32 +289,19 @@ app.post('/fetch-transactions', async (req, res) => {
           const decimals = await getTokenDecimals(token, tokenDecimalsCache);
           const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
-          // For swaps, finn tilhørende ut-verdi
-          let outAmount = '0', outCurrency = 'EGLD';
-          if (['swap_tokens_fixed_input', 'swap_tokens_fixed_output', 'multipairswap'].includes(func)) {
-            const outOp = tokenTransfersOut.find(o => o.identifier !== token);
-            if (outOp) {
-              const outAmountBig = BigInt(outOp.value);
-              const outDecimals = await getTokenDecimals(outOp.identifier, tokenDecimalsCache);
-              outAmount = new BigNumber(outAmountBig.toString()).dividedBy(new BigNumber(10).pow(outDecimals)).toFixed();
-              outCurrency = outOp.identifier || 'EGLD';
-              tokenTransfersOut = tokenTransfersOut.filter(o => o !== outOp); // Fjern brukt ut-operasjon
-            }
-          }
-
           taxRelevantTransactions.push({
             timestamp: tx.timestamp,
             function: tx.function || 'transfer',
             inAmount: formatted,
             inCurrency: token,
-            outAmount,
-            outCurrency,
+            outAmount: '0',
+            outCurrency: 'EGLD',
             fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
             txHash: tx.txHash
           });
         }
 
-        // Behandle gjenværende ut-overføringer (hvis ikke brukt i swaps)
+        // Behandle gjenværende ut-overføringer
         for (const [index, op] of tokenTransfersOut.entries()) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
@@ -292,7 +349,6 @@ app.post('/fetch-transactions', async (req, res) => {
             continue;
           }
 
-          // Filtrer for 5a57c6e9... for å prioritere XMEX-fda355
           if (tx.txHash === '5a57c6e9fd0b748132f127e4acaffb3da7dbc8a3866cfc7265f1da87412a59f7' && token !== 'XMEX-fda355') {
             console.log(`⚠️ Skipping non-XMEX token ${token} for tx ${tx.txHash}`);
             continue;
@@ -356,8 +412,7 @@ app.post('/fetch-transactions', async (req, res) => {
           });
         }
 
-        // Fallback kun hvis ingen overføringer er funnet
-        if (!hasAddedEGLD && tokenTransfersIn.length === 0 && esdtEvents.length === 0 && esdtResults.length === 0) {
+        if (!hasAddedEGLD && tokenTransfersIn.length === 0 && tokenTransfersOut.length === 0 && esdtEvents.length === 0 && esdtResults.length === 0) {
           console.warn(`⚠️ No transfers found for tx ${tx.txHash}, using fallback`);
           taxRelevantTransactions.push({
             timestamp: tx.timestamp,
@@ -375,7 +430,6 @@ app.post('/fetch-transactions', async (req, res) => {
       }
     }
 
-    // Dedupliser transaksjoner
     taxRelevantTransactions = deduplicateTransactions(taxRelevantTransactions);
 
     console.log(`Unike funksjonsnavn:`, Array.from(uniqueFunctions));
