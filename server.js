@@ -135,7 +135,10 @@ app.post('/fetch-transactions', async (req, res) => {
         const operations = detailed.data.operations || [];
         const logs = detailed.data.logs || { events: [] };
 
-        // Log rådata for feilsøking (fjern i produksjon)
+        // Log hele responsen for spesifikke transaksjoner (fjern i produksjon)
+        if (tx.txHash === '5a57c6e9fd0b748132f127e4acaffb3da7dbc8a3866cfc7265f1da87412a59f7') {
+          console.log(`Full response for tx ${tx.txHash}:`, JSON.stringify(detailed.data, null, 2));
+        }
         console.log(`scResults for tx ${tx.txHash}:`, JSON.stringify(scResults, null, 2));
         console.log(`Operations for tx ${tx.txHash}:`, JSON.stringify(operations, null, 2));
         console.log(`Logs for tx ${tx.txHash}:`, JSON.stringify(logs, null, 2));
@@ -166,16 +169,21 @@ app.post('/fetch-transactions', async (req, res) => {
             });
           }
         } else {
-          // Prøv logs.events som fallback
+          // Prøv logs.events med utvidet filter
           const esdtEvents = logs.events?.filter(event => 
-            event.identifier === 'ESDTTransfer' && 
-            event.address === walletAddress
+            ['ESDTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier) && 
+            (event.address === walletAddress || event.topics?.[2] === walletAddress)
           ) || [];
 
           if (esdtEvents.length > 0) {
             for (const [index, event] of esdtEvents.entries()) {
               const token = event.topics?.[0] || 'UNKNOWN';
               const amountHex = event.topics?.[1] || '0';
+              const receiver = event.topics?.[2] || event.address;
+              if (receiver !== walletAddress) {
+                console.warn(`⚠️ Skipping event for tx ${tx.txHash}, receiver ${receiver} does not match wallet ${walletAddress}`);
+                continue;
+              }
               const amount = decodeHexToBigInt(amountHex);
               if (amount === BigInt(0)) {
                 console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
