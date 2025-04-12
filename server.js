@@ -122,6 +122,37 @@ app.post('/fetch-transactions', async (req, res) => {
              (transfers.some(t => t.txHash === tx.txHash) || taxRelevantFunctions.includes(func));
     });
 
+    // 🔁 Extract token values
+    for (let tx of taxRelevantTransactions) {
+      tx.inAmount = tx.outAmount = '0';
+      tx.inCurrency = tx.outCurrency = 'EGLD';
+
+      const relatedTransfers = transfers.filter(t => t.txHash === tx.txHash);
+      for (let t of relatedTransfers) {
+        const isIn = t.receiver === walletAddress;
+        let identifier = t.identifier || 'EGLD';
+        let value = t.value || '0';
+
+        if (t.data?.startsWith('RVNEVFRyYW5zZmVy')) {
+          const decoded = decodeBase64ToString(t.data).split('@');
+          if (decoded.length >= 3) {
+            identifier = decodeHexToString(decoded[1]);
+            value = decodeHexToBigInt(decoded[2]).toString();
+          }
+        }
+
+        const decimals = await fetchTokenDecimals(identifier, tokenDecimalsCache);
+        const formatted = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+        if (isIn && tx.inAmount === '0') {
+          tx.inAmount = formatted;
+          tx.inCurrency = identifier;
+        } else if (!isIn && tx.outAmount === '0') {
+          tx.outAmount = formatted;
+          tx.outCurrency = identifier;
+        }
+      }
+    }
+
     reportProgress(clientId, `✅ Filtered ${taxRelevantTransactions.length} tax-relevant transactions.`);
     reportProgress(clientId, '✅ Done');
 
@@ -132,6 +163,20 @@ app.post('/fetch-transactions', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+async function fetchTokenDecimals(identifier, cache) {
+  if (cache[identifier]) return cache[identifier];
+  const known = { 'EGLD': 18, 'WEGLD-bd4d79': 18, 'MEX-43535633537': 18 };
+  if (known[identifier]) return known[identifier];
+  try {
+    const res = await axios.get(`https://api.multiversx.com/tokens/${identifier}`);
+    const decimals = res.data.decimals || 18;
+    cache[identifier] = decimals;
+    return decimals;
+  } catch {
+    return 18;
+  }
+}
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
