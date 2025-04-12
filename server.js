@@ -116,52 +116,56 @@ app.post('/fetch-transactions', async (req, res) => {
       'buy', 'sell', 'withdraw', 'claimlockedassets'
     ];
 
-    const taxRelevantTransactions = [];
+    const fetchTokenDecimals = async (tokenIdentifier) => {
+      if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
+      try {
+        const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
+        tokenDecimalsCache[tokenIdentifier] = response.data.decimals || 18;
+        return tokenDecimalsCache[tokenIdentifier];
+      } catch {
+        return 18;
+      }
+    };
+
     for (const tx of allTransactions) {
-      const isRelevant = taxRelevantFunctions.includes(tx.function?.toLowerCase() || '');
-      const hasTransfer = transfers.some(t => t.txHash === tx.txHash);
-      const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
-      if (withinDate && (isRelevant || hasTransfer)) {
-        tx.inAmount = '0';
-        tx.inCurrency = 'EGLD';
-        tx.outAmount = '0';
-        tx.outCurrency = 'EGLD';
+      tx.inAmount = '0';
+      tx.inCurrency = 'EGLD';
+      tx.outAmount = '0';
+      tx.outCurrency = 'EGLD';
 
-        try {
-          const { data } = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-          const results = data.results || [];
+      try {
+        const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
+        const scResults = detailed.data.results || [];
 
-          for (const scr of results) {
-            if (!scr.data || scr.receiver !== walletAddress) continue;
+        for (const scr of scResults) {
+          if (!scr.data || !scr.receiver) continue;
+          const decodedData = decodeBase64ToString(scr.data);
 
-            const decoded = decodeBase64ToString(scr.data);
-            const parts = decoded.split('@');
-            if (parts[0] !== 'ESDTNFTTransfer' || parts.length < 3) continue;
-
-            const tokenHex = parts[1];
-            const amountHex = parts[2];
-            const token = decodeHexToString(tokenHex);
-
-            // Skip LP tokens
-            if (token.includes('LP') || token.includes('FL')) continue;
-
-            const amount = decodeHexToBigInt(amountHex);
-            const decimals = tokenDecimalsCache[token] ?? (await axios.get(`https://api.multiversx.com/tokens/${token}`).then(r => r.data.decimals).catch(() => 18));
-            tokenDecimalsCache[token] = decimals;
-
-            const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-            if (formatted !== '0') {
+          if (decodedData.startsWith('ESDTNFTTransfer') && scr.receiver === walletAddress) {
+            const parts = decodedData.split('@');
+            if (parts.length >= 3) {
+              const tokenHex = parts[1];
+              const amountHex = parts[2];
+              const token = decodeHexToString(tokenHex);
+              if (token.includes('LP') || token.includes('FL')) continue;
+              const amount = decodeHexToBigInt(amountHex);
+              const decimals = await fetchTokenDecimals(token);
+              const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
               tx.inAmount = formatted;
               tx.inCurrency = token;
             }
           }
-        } catch (err) {
-          console.warn(`Error decoding tx ${tx.txHash}: ${err.message}`);
         }
-
-        taxRelevantTransactions.push(tx);
+      } catch (err) {
+        console.warn(`⚠️ Could not fetch tx ${tx.txHash}:`, err.message);
       }
     }
+
+    const taxRelevantTransactions = allTransactions.filter(tx => {
+      const func = tx.function?.toLowerCase() || '';
+      return (tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp) &&
+             (transfers.some(t => t.txHash === tx.txHash) || taxRelevantFunctions.includes(func));
+    });
 
     reportProgress(clientId, `✅ Filtered ${taxRelevantTransactions.length} tax-relevant transactions.`);
     reportProgress(clientId, '✅ Done');
