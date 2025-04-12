@@ -35,10 +35,23 @@ function reportProgress(clientId, message) {
 }
 
 const validateWalletAddress = (address) => /^erd1[0-9a-z]{58}$/.test(address);
-function decodeHexToString(hex) { return Buffer.from(hex, 'hex').toString(); }
-function decodeHexToBigInt(hex) { return BigInt(`0x${hex}`); }
-function decodeBase64ToString(base64) { return Buffer.from(base64, 'base64').toString(); }
-function decodeBase64ToHex(base64) { return Buffer.from(base64, 'base64').toString('hex'); }
+function decodeHexToString(hex) { try { return Buffer.from(hex, 'hex').toString(); } catch { return ''; } }
+function decodeHexToBigInt(hex) { try { return BigInt(`0x${hex}`); } catch { return BigInt(0); } }
+function decodeBase64ToString(base64) { try { return Buffer.from(base64, 'base64').toString(); } catch { return ''; } }
+function decodeBase64ToHex(base64) { try { return Buffer.from(base64, 'base64').toString('hex'); } catch { return '0'; } }
+
+// Konverter hex til Bech32-adresse (erd1...)
+function hexToBech32(hex) {
+  try {
+    const bech32 = require('bech32');
+    const bytes = Buffer.from(hex, 'hex');
+    const words = bech32.toWords(bytes);
+    return bech32.bech32.encode('erd', words);
+  } catch (err) {
+    console.warn(`⚠️ Failed to convert hex to Bech32:`, err.message);
+    return '';
+  }
+}
 
 async function fetchWithRetry(url, params, retries = 3, delayMs = 500) {
   for (let i = 0; i < retries; i++) {
@@ -126,8 +139,9 @@ app.post('/fetch-transactions', async (req, res) => {
       const tx = allTransactions[i];
       reportProgress(clientId, `🔍 Behandler ${i + 1} av ${allTransactions.length} transaksjoner...`);
       const func = tx.function?.toLowerCase() || '';
-      const isTaxRelevant = taxRelevantFunctions.includes(func);
+      console.log(`Checking tx ${tx.txHash}: function=${func}`);
 
+      const isTaxRelevant = taxRelevantFunctions.includes(func);
       if (!isTaxRelevant) {
         console.log(`⚠️ Skipping tx ${tx.txHash}: function ${func} not tax-relevant`);
         continue;
@@ -173,7 +187,7 @@ app.post('/fetch-transactions', async (req, res) => {
             });
           }
         } else {
-          // Prøv logs.events med utvidet filter
+          // Prøv logs.events med forbedret håndtering
           const esdtEvents = logs.events?.filter(event => 
             ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier)
           ) || [];
@@ -184,28 +198,36 @@ app.post('/fetch-transactions', async (req, res) => {
               const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
               const amountHex = event.topics?.[2] || '0';
               const receiverBase64 = event.topics?.[3] || '';
+              console.log(`Raw topics for event:`, event.topics);
+
+              // Dekode mottakeradresse fra base64 til hex, deretter til Bech32
               let receiver = '';
               try {
-                receiver = decodeBase64ToString(receiverBase64);
+                const receiverHex = decodeBase64ToHex(receiverBase64);
+                receiver = hexToBech32(receiverHex);
+                console.log(`Decoded receiver for tx ${tx.txHash}: ${receiver}`);
               } catch (err) {
                 console.warn(`⚠️ Failed to decode receiver for tx ${tx.txHash}:`, err.message);
                 continue;
               }
+
               if (receiver !== walletAddress) {
                 console.warn(`⚠️ Skipping event for tx ${tx.txHash}, receiver ${receiver} does not match wallet ${walletAddress}`);
                 continue;
               }
-              let amount;
+
+              let amount = BigInt(0);
               try {
                 amount = decodeHexToBigInt(decodeBase64ToHex(amountHex));
               } catch (err) {
                 console.warn(`⚠️ Failed to decode amount for tx ${tx.txHash}:`, err.message);
                 continue;
               }
-              if (amount === BigInt(0)) {
-                console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
+              if (amount <= BigInt(0)) {
+                console.warn(`⚠️ Null or negative amount for token ${token} in tx ${tx.txHash}`);
                 continue;
               }
+
               const decimals = await getTokenDecimals(token, tokenDecimalsCache);
               const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
@@ -241,8 +263,8 @@ app.post('/fetch-transactions', async (req, res) => {
                 const amountHex = parts[2];
                 const token = decodeHexToString(tokenHex);
                 const amount = decodeHexToBigInt(amountHex);
-                if (amount === BigInt(0)) {
-                  console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
+                if (amount <= BigInt(0)) {
+                  console.warn(`⚠️ Null or negative amount for token ${token} in tx ${tx.txHash}`);
                   continue;
                 }
                 const decimals = await getTokenDecimals(token, tokenDecimalsCache);
