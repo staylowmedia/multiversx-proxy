@@ -40,19 +40,6 @@ function decodeHexToBigInt(hex) { try { return BigInt(`0x${hex}`); } catch { ret
 function decodeBase64ToString(base64) { try { return Buffer.from(base64, 'base64').toString(); } catch { return ''; } }
 function decodeBase64ToHex(base64) { try { return Buffer.from(base64, 'base64').toString('hex'); } catch { return '0'; } }
 
-// Fallback for Bech32-dekoding
-function hexToBech32(hex) {
-  try {
-    const bech32 = require('bech32');
-    const bytes = Buffer.from(hex, 'hex');
-    const words = bech32.toWords(bytes);
-    return bech32.bech32.encode('erd', words);
-  } catch (err) {
-    console.warn(`⚠️ Failed to convert hex to Bech32:`, err.message);
-    return '';
-  }
-}
-
 async function fetchWithRetry(url, params, retries = 3, delayMs = 500) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -101,15 +88,14 @@ app.post('/fetch-transactions', async (req, res) => {
   }
 
   const cacheKey = `${walletAddress}:${fromDate}:${toDate}`;
-  // Tøm cache for å unngå gamle data
-  cache.del(cacheKey);
+  cache.del(cacheKey); // Tøm cache
   const cached = cache.get(cacheKey);
   if (cached) {
     reportProgress(clientId, '✅ Hentet fra cache');
     return res.json(cached);
   }
 
-  let allTransactions = [], tokenDecimalsCache = {};
+  let allTransactions = [], tokenDecimalsCache = {}, uniqueFunctions = new Set();
 
   try {
     await fetchWithRetry(`https://api.multiversx.com/accounts/${walletAddress}`, {});
@@ -134,7 +120,8 @@ app.post('/fetch-transactions', async (req, res) => {
     const taxRelevantFunctions = [
       'claimrewards', 'claim', 'claimrewardsproxy',
       'swap_tokens_fixed_input', 'swap_tokens_fixed_output',
-      'transfer', 'esdttransfer', 'multiesdtnfttransfer'
+      'transfer', 'esdttransfer', 'multiesdtnfttransfer',
+      'swap', 'send', 'receive'
     ];
 
     let taxRelevantTransactions = [];
@@ -143,18 +130,19 @@ app.post('/fetch-transactions', async (req, res) => {
       const tx = allTransactions[i];
       reportProgress(clientId, `🔍 Behandler ${i + 1} av ${allTransactions.length} transaksjoner...`);
       const func = tx.function?.toLowerCase() || '';
-      console.log(`Checking tx ${tx.txHash}: function=${func}`);
+      uniqueFunctions.add(func);
+      console.log(`Checking tx ${tx.txHash}: function=${func}, value=${tx.value}, receiver=${tx.receiver}`);
 
-      // Spesifikk håndtering for 5a57c6e9... (midlertidig)
-      if (tx.txHash === '5a57c6e9fd0b748132f127e4acaffb3da7dbc8a3866cfc7265f1da87412a59f7') {
-        console.log(`Force processing tx ${tx.txHash} as tax-relevant`);
-        const decimals = await getTokenDecimals('XMEX-fda355', tokenDecimalsCache);
-        const formatted = new BigNumber('4731318230000000000000000').dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+      // Håndter direkte EGLD-overføringer
+      if (tx.receiver === walletAddress && tx.value && BigInt(tx.value) > 0) {
+        console.log(`Found EGLD transfer for tx ${tx.txHash}: ${tx.value} wei`);
+        const amount = BigInt(tx.value);
+        const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed();
         taxRelevantTransactions.push({
           timestamp: tx.timestamp,
-          function: 'claimRewardsProxy',
+          function: 'transfer',
           inAmount: formatted,
-          inCurrency: 'XMEX-fda355',
+          inCurrency: 'EGLD',
           outAmount: '0',
           outCurrency: 'EGLD',
           fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
@@ -163,7 +151,7 @@ app.post('/fetch-transactions', async (req, res) => {
         continue;
       }
 
-      const isTaxRelevant = taxRelevantFunctions.includes(func);
+      const isTaxRelevant = taxRelevantFunctions.includes(func) || !func;
       if (!isTaxRelevant) {
         console.log(`⚠️ Skipping tx ${tx.txHash}: function ${func} not tax-relevant`);
         continue;
@@ -175,8 +163,9 @@ app.post('/fetch-transactions', async (req, res) => {
         const operations = detailed.data.operations || [];
         const logs = detailed.data.logs || { events: [] };
 
-        // Log hele responsen for spesifikke transaksjoner (fjern i produksjon)
-        if (tx.txHash === '5a57c6e9fd0b748132f127e4acaffb3da7dbc8a3866cfc7265f1da87412a59f7') {
+        // Log for spesifikke transaksjoner
+        if (tx.txHash === '5a57c6e9fd0b748132f127e4acaffb3da7dbc8a3866cfc7265f1da87412a59f7' || 
+            tx.txHash === '31634e93b069bd30c912476bf01f30886f750545fcaf0832971cfa1d428d8c65') {
           console.log(`Full response for tx ${tx.txHash}:`, JSON.stringify(detailed.data, null, 2));
         }
         console.log(`scResults for tx ${tx.txHash}:`, JSON.stringify(scResults, null, 2));
@@ -209,7 +198,7 @@ app.post('/fetch-transactions', async (req, res) => {
             });
           }
         } else {
-          // Prøv logs.events med forenklet håndtering
+          // Prøv logs.events
           const esdtEvents = logs.events?.filter(event => 
             ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier)
           ) || [];
@@ -219,30 +208,7 @@ app.post('/fetch-transactions', async (req, res) => {
               console.log(`Processing event for tx ${tx.txHash}:`, JSON.stringify(event, null, 2));
               const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
               const amountHex = event.topics?.[2] || '0';
-              const receiverBase64 = event.topics?.[3] || '';
               console.log(`Raw topics for event:`, event.topics);
-
-              // Prøv Bech32-dekoding, med fallback til direkte hex-sammenligning
-              let receiver = '';
-              try {
-                const receiverHex = decodeBase64ToHex(receiverBase64);
-                receiver = hexToBech32(receiverHex);
-                console.log(`Decoded receiver for tx ${tx.txHash}: ${receiver}`);
-              } catch (err) {
-                console.warn(`⚠️ Failed to decode receiver for tx ${tx.txHash}:`, err.message);
-                // Fallback: Sammenlign hex direkte
-                const walletHex = Buffer.from(walletAddress.slice(3), 'hex').toString('hex');
-                const receiverHex = decodeBase64ToHex(receiverBase64);
-                if (receiverHex === walletHex) {
-                  receiver = walletAddress;
-                  console.log(`Fallback: Matched receiver via hex for tx ${tx.txHash}`);
-                }
-              }
-
-              if (receiver !== walletAddress) {
-                console.warn(`⚠️ Skipping event for tx ${tx.txHash}, receiver ${receiver} does not match wallet ${walletAddress}`);
-                continue;
-              }
 
               let amount = BigInt(0);
               try {
@@ -264,6 +230,7 @@ app.post('/fetch-transactions', async (req, res) => {
                 function: tx.function || 'transfer',
                 inAmount: formatted,
                 inCurrency: token,
+                _
                 outAmount: '0',
                 outCurrency: 'EGLD',
                 fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
@@ -271,7 +238,7 @@ app.post('/fetch-transactions', async (req, res) => {
               });
             }
           } else {
-            // Prøv scResults som siste fallback
+            // Prøv scResults
             const esdtResults = scResults.filter(r => 
               r.receiver === walletAddress && 
               r.data && 
@@ -329,6 +296,7 @@ app.post('/fetch-transactions', async (req, res) => {
       }
     }
 
+    console.log(`Unike funksjonsnavn:`, Array.from(uniqueFunctions));
     const result = { allTransactions, taxRelevantTransactions };
     if (taxRelevantTransactions.length === 0) {
       reportProgress(clientId, '⚠️ Ingen skatterelevante transaksjoner funnet');
