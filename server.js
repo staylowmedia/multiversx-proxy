@@ -128,7 +128,10 @@ app.post('/fetch-transactions', async (req, res) => {
       const func = tx.function?.toLowerCase() || '';
       const isTaxRelevant = taxRelevantFunctions.includes(func);
 
-      if (!isTaxRelevant) continue;
+      if (!isTaxRelevant) {
+        console.log(`⚠️ Skipping tx ${tx.txHash}: function ${func} not tax-relevant`);
+        continue;
+      }
 
       try {
         const detailed = await fetchWithRetry(`https://api.multiversx.com/transactions/${tx.txHash}?withOperations=true&withLogs=true`, {});
@@ -177,15 +180,28 @@ app.post('/fetch-transactions', async (req, res) => {
 
           if (esdtEvents.length > 0) {
             for (const [index, event] of esdtEvents.entries()) {
+              console.log(`Processing event for tx ${tx.txHash}:`, JSON.stringify(event, null, 2));
               const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
               const amountHex = event.topics?.[2] || '0';
               const receiverBase64 = event.topics?.[3] || '';
-              const receiver = decodeBase64ToString(receiverBase64);
+              let receiver = '';
+              try {
+                receiver = decodeBase64ToString(receiverBase64);
+              } catch (err) {
+                console.warn(`⚠️ Failed to decode receiver for tx ${tx.txHash}:`, err.message);
+                continue;
+              }
               if (receiver !== walletAddress) {
                 console.warn(`⚠️ Skipping event for tx ${tx.txHash}, receiver ${receiver} does not match wallet ${walletAddress}`);
                 continue;
               }
-              const amount = decodeHexToBigInt(decodeBase64ToHex(amountHex));
+              let amount;
+              try {
+                amount = decodeHexToBigInt(decodeBase64ToHex(amountHex));
+              } catch (err) {
+                console.warn(`⚠️ Failed to decode amount for tx ${tx.txHash}:`, err.message);
+                continue;
+              }
               if (amount === BigInt(0)) {
                 console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
                 continue;
@@ -264,8 +280,12 @@ app.post('/fetch-transactions', async (req, res) => {
     }
 
     const result = { allTransactions, taxRelevantTransactions };
+    if (taxRelevantTransactions.length === 0) {
+      reportProgress(clientId, '⚠️ Ingen skatterelevante transaksjoner funnet');
+    } else {
+      reportProgress(clientId, '✅ Fullført');
+    }
     cache.set(cacheKey, result);
-    reportProgress(clientId, '✅ Fullført');
     res.json(result);
   } catch (error) {
     console.error('❌ Feil i fetch-transactions:', error.message);
