@@ -13,7 +13,6 @@ app.use(cors());
 app.use(express.json());
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const RATE_LIMIT_DELAY = 500;
 
 app.get('/progress/:id', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -40,16 +39,41 @@ function decodeHexToString(hex) { return Buffer.from(hex, 'hex').toString(); }
 function decodeHexToBigInt(hex) { return BigInt(`0x${hex}`); }
 function decodeBase64ToString(base64) { return Buffer.from(base64, 'base64').toString(); }
 
+async function fetchWithRetry(url, params, retries = 3, delayMs = 500) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await axios.get(url, { params });
+      return response;
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await delay(delayMs * Math.pow(2, i));
+    }
+  }
+}
+
+async function getTokenDecimals(token, tokenDecimalsCache) {
+  if (tokenDecimalsCache[token]) return tokenDecimalsCache[token];
+  try {
+    const response = await axios.get(`https://api.multiversx.com/tokens/${token}`);
+    const decimals = response.data.decimals || 18;
+    tokenDecimalsCache[token] = decimals;
+    return decimals;
+  } catch (err) {
+    console.warn(`⚠️ Could not fetch decimals for ${token}:`, err.message);
+    return 18; // Fallback
+  }
+}
+
 app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate, clientId } = req.body;
 
   if (!walletAddress || !fromDate || !toDate || !clientId) {
-    return res.status(400).json({ error: 'Missing required parameters' });
+    return res.status(400).json({ error: 'Manglende nødvendige parametere' });
   }
 
-  reportProgress(clientId, '📡 Validating address...');
+  reportProgress(clientId, '📡 Validerer adresse...');
   if (!validateWalletAddress(walletAddress)) {
-    return res.status(400).json({ error: 'Invalid wallet address' });
+    return res.status(400).json({ error: 'Ugyldig lommebokadresse' });
   }
 
   const fromDateObj = new Date(fromDate);
@@ -58,15 +82,22 @@ app.post('/fetch-transactions', async (req, res) => {
   const endTimestamp = Math.floor(toDateObj.getTime() / 1000);
 
   if (fromDateObj > toDateObj) {
-    return res.status(400).json({ error: 'Invalid date range' });
+    return res.status(400).json({ error: 'Ugyldig datoperiode' });
   }
 
-  let allTransactions = [], transfers = [], tokenDecimalsCache = {};
+  const cacheKey = `${walletAddress}:${fromDate}:${toDate}`;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    reportProgress(clientId, '✅ Hentet fra cache');
+    return res.json(cached);
+  }
+
+  let allTransactions = [], tokenDecimalsCache = {};
 
   try {
     await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
 
-    reportProgress(clientId, '🔍 Fetching transactions...');
+    reportProgress(clientId, '🔍 Henter transaksjoner...');
     const pageSize = 1000;
     for (let fromIndex = 0; fromIndex < 10000; fromIndex += pageSize) {
       const params = {
@@ -76,11 +107,10 @@ app.post('/fetch-transactions', async (req, res) => {
         order: 'asc',
         from: fromIndex
       };
-      const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
+      const response = await fetchWithRetry(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, params);
       const batch = response.data;
       allTransactions.push(...batch);
-      reportProgress(clientId, `📦 Got ${allTransactions.length} transactions...`);
-      await delay(RATE_LIMIT_DELAY);
+      reportProgress(clientId, `📦 Hentet ${allTransactions.length} transaksjoner...`);
       if (batch.length < pageSize) break;
     }
 
@@ -88,74 +118,75 @@ app.post('/fetch-transactions', async (req, res) => {
       'claimrewards', 'claim', 'claimrewardsproxy'
     ];
 
-    const fetchTokenDecimals = async (tokenIdentifier) => {
-      if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
-      try {
-        const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
-        const decimals = response.data.decimals || 18;
-        tokenDecimalsCache[tokenIdentifier] = decimals;
-        return decimals;
-      } catch {
-        tokenDecimalsCache[tokenIdentifier] = 18;
-        return 18;
-      }
-    };
+    let taxRelevantTransactions = [];
 
-    const results = [];
-
-    for (const tx of allTransactions) {
+    for (let i = 0; i < allTransactions.length; i++) {
+      const tx = allTransactions[i];
+      reportProgress(clientId, `🔍 Behandler ${i + 1} av ${allTransactions.length} transaksjoner...`);
       const func = tx.function?.toLowerCase() || '';
-      if (!taxRelevantFunctions.includes(func)) continue;
+      const isTaxRelevant = taxRelevantFunctions.includes(func);
 
-      const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-      const scResults = detailed.data.results || [];
-      for (const scr of scResults) {
-        if (!scr.data) continue;
-        const decodedData = decodeBase64ToString(scr.data);
-        const parts = decodedData.split('@');
-        if (parts[0]?.toLowerCase() !== 'esdttransfer' || parts.length < 3) continue;
+      if (!isTaxRelevant) continue;
 
-        const token = decodeHexToString(parts[1]);
-        const amount = decodeHexToBigInt(parts[2]);
-        const decimals = await fetchTokenDecimals(token);
-        const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+      try {
+        const detailed = await fetchWithRetry(`https://api.multiversx.com/transactions/${tx.txHash}`, {});
+        const scResults = detailed.data.results || [];
 
-        results.push({
-          timestamp: tx.timestamp,
-          function: tx.function,
-          inAmount: formattedAmount,
-          inCurrency: token,
-          outAmount: '0',
-          outCurrency: 'EGLD',
-          fee: tx.fee,
-          txHash: tx.txHash
-        });
-      }
+        const esdtTransfers = scResults.filter(r => r.data?.startsWith('RVNEVFRyYW5zZmVy'));
 
-      if (scResults.length === 0) {
-        results.push({
-          timestamp: tx.timestamp,
-          function: tx.function,
-          inAmount: '0',
-          inCurrency: 'EGLD',
-          outAmount: '0',
-          outCurrency: 'EGLD',
-          fee: tx.fee,
-          txHash: tx.txHash
-        });
+        for (const result of esdtTransfers) {
+          const decodedData = decodeBase64ToString(result.data);
+          const parts = decodedData.split('@');
+          if (parts.length < 3) continue;
+
+          const tokenHex = parts[1];
+          const amountHex = parts[2];
+          const token = decodeHexToString(tokenHex);
+          const amount = decodeHexToBigInt(amountHex);
+          const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+          const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+          taxRelevantTransactions.push({
+            timestamp: tx.timestamp,
+            function: tx.function,
+            inAmount: formatted,
+            inCurrency: token,
+            outAmount: '0',
+            outCurrency: 'EGLD',
+            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+            txHash: tx.txHash
+          });
+        }
+
+        if (esdtTransfers.length === 0) {
+          taxRelevantTransactions.push({
+            timestamp: tx.timestamp,
+            function: tx.function,
+            inAmount: '0',
+            inCurrency: 'EGLD',
+            outAmount: '0',
+            outCurrency: 'EGLD',
+            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+            txHash: tx.txHash
+          });
+        }
+      } catch (err) {
+        console.warn(`⚠️ Kunne ikke hente SC-resultat for tx ${tx.txHash}:`, err.message);
       }
     }
 
-    reportProgress(clientId, `✅ Done`);
-    res.json({ allTransactions, taxRelevantTransactions: results });
+    const result = { allTransactions, taxRelevantTransactions };
+    cache.set(cacheKey, result);
+    reportProgress(clientId, '✅ Fullført');
+    res.json(result);
   } catch (error) {
-    console.error('❌ Error in fetch-transactions:', error);
-    reportProgress(clientId, '❌ Failed');
-    res.status(500).json({ error: error.message });
+    console.error('❌ Feil i fetch-transactions:', error);
+    reportProgress(clientId, '❌ Mislyktes');
+    res.status(500).json({ error: 'Kunne ikke hente transaksjoner. Prøv igjen senere.' });
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 Proxy server running on port ${PORT}`);
+  console.log(`🚀 Proxy server kjører på port ${PORT}`);
 });
