@@ -169,21 +169,25 @@ app.post('/fetch-transactions', async (req, res) => {
             });
           }
         } else {
-          // Prøv logs.events med utvidet filter
-          const esdtEvents = logs.events?.filter(event => 
-            ['ESDTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier) && 
-            (event.address === walletAddress || event.topics?.[2] === walletAddress)
-          ) || [];
+          // Prøv results direkte for ESDT-overføringer
+          const esdtResults = scResults.filter(r => 
+            r.receiver === walletAddress && 
+            r.data && 
+            (r.data.startsWith('RVNEVFRyYW5zZmVy') || r.function === 'ESDTTransfer')
+          );
 
-          if (esdtEvents.length > 0) {
-            for (const [index, event] of esdtEvents.entries()) {
-              const token = event.topics?.[0] || 'UNKNOWN';
-              const amountHex = event.topics?.[1] || '0';
-              const receiver = event.topics?.[2] || event.address;
-              if (receiver !== walletAddress) {
-                console.warn(`⚠️ Skipping event for tx ${tx.txHash}, receiver ${receiver} does not match wallet ${walletAddress}`);
+          if (esdtResults.length > 0) {
+            for (const [index, result] of esdtResults.entries()) {
+              const decodedData = decodeBase64ToString(result.data);
+              const parts = decodedData.split('@');
+              if (parts.length < 3) {
+                console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
                 continue;
               }
+
+              const tokenHex = parts[1];
+              const amountHex = parts[2];
+              const token = decodeHexToString(tokenHex);
               const amount = decodeHexToBigInt(amountHex);
               if (amount === BigInt(0)) {
                 console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
@@ -204,23 +208,21 @@ app.post('/fetch-transactions', async (req, res) => {
               });
             }
           } else {
-            // Prøv scResults som siste fallback
-            const esdtTransfers = scResults.filter(r => r.data && (
-              r.data.startsWith('RVNEVFRyYW5zZmVy') || 
-              r.data.includes('transfer')
-            ));
-            if (esdtTransfers.length > 0) {
-              for (const [index, result] of esdtTransfers.entries()) {
-                const decodedData = decodeBase64ToString(result.data);
-                const parts = decodedData.split('@');
-                if (parts.length < 3) {
-                  console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+            // Prøv logs.events med utvidet filter
+            const esdtEvents = logs.events?.filter(event => 
+              ['ESDTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier) && 
+              (event.address === walletAddress || event.topics?.[2] === walletAddress)
+            ) || [];
+
+            if (esdtEvents.length > 0) {
+              for (const [index, event] of esdtEvents.entries()) {
+                const token = event.topics?.[0] || 'UNKNOWN';
+                const amountHex = event.topics?.[1] || '0';
+                const receiver = event.topics?.[2] || event.address;
+                if (receiver !== walletAddress) {
+                  console.warn(`⚠️ Skipping event for tx ${tx.txHash}, receiver ${receiver} does not match wallet ${walletAddress}`);
                   continue;
                 }
-
-                const tokenHex = parts[1];
-                const amountHex = parts[2];
-                const token = decodeHexToString(tokenHex);
                 const amount = decodeHexToBigInt(amountHex);
                 if (amount === BigInt(0)) {
                   console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
