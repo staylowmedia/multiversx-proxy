@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -89,66 +88,66 @@ app.post('/fetch-transactions', async (req, res) => {
       'claimrewards', 'claim', 'claimrewardsproxy'
     ];
 
-    let taxRelevantTransactions = [];
-
-    for (let i = 0; i < allTransactions.length; i++) {
-      const tx = allTransactions[i];
-      reportProgress(clientId, `🔍 Fetching ${i + 1} of ${allTransactions.length} transactions...`);
-      const func = tx.function?.toLowerCase() || '';
-      const isTaxRelevant = taxRelevantFunctions.includes(func);
-
-      if (!isTaxRelevant) continue;
-
+    const fetchTokenDecimals = async (tokenIdentifier) => {
+      if (tokenDecimalsCache[tokenIdentifier]) return tokenDecimalsCache[tokenIdentifier];
       try {
-        const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-        const scResults = detailed.data.results || [];
+        const response = await axios.get(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
+        const decimals = response.data.decimals || 18;
+        tokenDecimalsCache[tokenIdentifier] = decimals;
+        return decimals;
+      } catch {
+        tokenDecimalsCache[tokenIdentifier] = 18;
+        return 18;
+      }
+    };
 
-        const esdtTransfers = scResults.filter(r => r.data?.startsWith('RVNEVFRyYW5zZmVy'));
+    const results = [];
 
-        for (const result of esdtTransfers) {
-          const decodedData = decodeBase64ToString(result.data);
-          const parts = decodedData.split('@');
-          if (parts.length < 3) continue;
+    for (const tx of allTransactions) {
+      const func = tx.function?.toLowerCase() || '';
+      if (!taxRelevantFunctions.includes(func)) continue;
 
-          const tokenHex = parts[1];
-          const amountHex = parts[2];
-          const token = decodeHexToString(tokenHex);
-          const amount = decodeHexToBigInt(amountHex);
-          const decimals = tokenDecimalsCache[token] || 18;
-          const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+      const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
+      const scResults = detailed.data.results || [];
+      for (const scr of scResults) {
+        if (!scr.data) continue;
+        const decodedData = decodeBase64ToString(scr.data);
+        const parts = decodedData.split('@');
+        if (parts[0]?.toLowerCase() !== 'esdttransfer' || parts.length < 3) continue;
 
-          taxRelevantTransactions.push({
-            timestamp: tx.timestamp,
-            function: tx.function,
-            inAmount: formatted,
-            inCurrency: token,
-            outAmount: '0',
-            outCurrency: 'EGLD',
-            fee: tx.fee || '0',
-            txHash: tx.txHash
-          });
-        }
+        const token = decodeHexToString(parts[1]);
+        const amount = decodeHexToBigInt(parts[2]);
+        const decimals = await fetchTokenDecimals(token);
+        const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
 
-        // If no tokens, add empty fallback
-        if (esdtTransfers.length === 0) {
-          taxRelevantTransactions.push({
-            timestamp: tx.timestamp,
-            function: tx.function,
-            inAmount: '0',
-            inCurrency: 'EGLD',
-            outAmount: '0',
-            outCurrency: 'EGLD',
-            fee: tx.fee || '0',
-            txHash: tx.txHash
-          });
-        }
-      } catch (err) {
-        console.warn(`⚠️ Could not fetch SC result for tx ${tx.txHash}:`, err.message);
+        results.push({
+          timestamp: tx.timestamp,
+          function: tx.function,
+          inAmount: formattedAmount,
+          inCurrency: token,
+          outAmount: '0',
+          outCurrency: 'EGLD',
+          fee: tx.fee,
+          txHash: tx.txHash
+        });
+      }
+
+      if (scResults.length === 0) {
+        results.push({
+          timestamp: tx.timestamp,
+          function: tx.function,
+          inAmount: '0',
+          inCurrency: 'EGLD',
+          outAmount: '0',
+          outCurrency: 'EGLD',
+          fee: tx.fee,
+          txHash: tx.txHash
+        });
       }
     }
 
     reportProgress(clientId, `✅ Done`);
-    res.json({ allTransactions, taxRelevantTransactions });
+    res.json({ allTransactions, taxRelevantTransactions: results });
   } catch (error) {
     console.error('❌ Error in fetch-transactions:', error);
     reportProgress(clientId, '❌ Failed');
@@ -156,7 +155,7 @@ app.post('/fetch-transactions', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Proxy server running on port ${PORT}`);
 });
