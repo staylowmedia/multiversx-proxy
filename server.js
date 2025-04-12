@@ -99,7 +99,7 @@ app.post('/fetch-transactions', async (req, res) => {
 
     reportProgress(clientId, '🔍 Henter transaksjoner...');
     const pageSize = 1000;
-    for let fromIndex = 0; fromIndex < 10000; fromIndex += pageSize) {
+    for (let fromIndex = 0; fromIndex < 10000; fromIndex += pageSize) {
       const params = {
         after: startTimestamp,
         before: endTimestamp,
@@ -134,12 +134,12 @@ app.post('/fetch-transactions', async (req, res) => {
         const operations = detailed.data.operations || [];
 
         // Log rådata for feilsøking (fjern i produksjon)
-        console.log(`scResults for tx ${tx.txHash}:`, scResults);
-        console.log(`Operations for tx ${tx.txHash}:`, operations);
+        console.log(`scResults for tx ${tx.txHash}:`, JSON.stringify(scResults, null, 2));
+        console.log(`Operations for tx ${tx.txHash}:`, JSON.stringify(operations, null, 2));
 
         // Håndter token-overføringer fra operations
         let tokenTransfers = operations.filter(op => 
-          op.action === 'transfer' && 
+          (op.action === 'transfer' || op.action === 'ESDTTransfer') && 
           op.type === 'esdt' && 
           op.receiver === walletAddress // Kun overføringer til lommeboken
         );
@@ -148,6 +148,10 @@ app.post('/fetch-transactions', async (req, res) => {
           for (const [index, op] of tokenTransfers.entries()) {
             const token = op.identifier || op.name;
             const amount = BigInt(op.value || '0');
+            if (amount === BigInt(0)) {
+              console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
+              continue;
+            }
             const decimals = await getTokenDecimals(token, tokenDecimalsCache);
             const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
@@ -164,7 +168,10 @@ app.post('/fetch-transactions', async (req, res) => {
           }
         } else {
           // Prøv scResults som fallback
-          const esdtTransfers = scResults.filter(r => r.data && r.data.startsWith('RVNEVFRyYW5zZmVy'));
+          const esdtTransfers = scResults.filter(r => r.data && (
+            r.data.startsWith('RVNEVFRyYW5zZmVy') || // ESDTTransfer
+            r.data.includes('transfer') // Mer fleksibel sjekk
+          ));
           if (esdtTransfers.length > 0) {
             for (const [index, result] of esdtTransfers.entries()) {
               const decodedData = decodeBase64ToString(result.data);
@@ -178,6 +185,10 @@ app.post('/fetch-transactions', async (req, res) => {
               const amountHex = parts[2];
               const token = decodeHexToString(tokenHex);
               const amount = decodeHexToBigInt(amountHex);
+              if (amount === BigInt(0)) {
+                console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
+                continue;
+              }
               const decimals = await getTokenDecimals(token, tokenDecimalsCache);
               const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
@@ -194,6 +205,7 @@ app.post('/fetch-transactions', async (req, res) => {
             }
           } else {
             // Fallback for transaksjoner uten token-overføringer
+            console.warn(`⚠️ No token transfers found for tx ${tx.txHash}, using fallback`);
             taxRelevantTransactions.push({
               timestamp: tx.timestamp,
               function: tx.function,
