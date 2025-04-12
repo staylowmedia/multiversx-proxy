@@ -132,33 +132,35 @@ app.post('/fetch-transactions', async (req, res) => {
         const detailed = await fetchWithRetry(`https://api.multiversx.com/transactions/${tx.txHash}`, {});
         const scResults = detailed.data.results || [];
 
-        const esdtTransfers = scResults.filter(r => r.data?.startsWith('RVNEVFRyYW5zZmVy'));
+        const esdtTransfers = scResults.filter(r => r.data?.startsWith('ESDTTransfer'));
 
-        for (const result of esdtTransfers) {
-          const decodedData = decodeBase64ToString(result.data);
-          const parts = decodedData.split('@');
-          if (parts.length < 3) continue;
+        if (esdtTransfers.length > 0) {
+          // Behandle hver token-overføring som en separat transaksjon
+          for (const [index, result] of esdtTransfers.entries()) {
+            const decodedData = decodeBase64ToString(result.data);
+            const parts = decodedData.split('@');
+            if (parts.length < 3) continue;
 
-          const tokenHex = parts[1];
-          const amountHex = parts[2];
-          const token = decodeHexToString(tokenHex);
-          const amount = decodeHexToBigInt(amountHex);
-          const decimals = await getTokenDecimals(token, tokenDecimalsCache);
-          const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+            const tokenHex = parts[1];
+            const amountHex = parts[2];
+            const token = decodeHexToString(tokenHex);
+            const amount = decodeHexToBigInt(amountHex);
+            const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+            const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
-          taxRelevantTransactions.push({
-            timestamp: tx.timestamp,
-            function: tx.function,
-            inAmount: formatted,
-            inCurrency: token,
-            outAmount: '0',
-            outCurrency: 'EGLD',
-            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-            txHash: tx.txHash
-          });
-        }
-
-        if (esdtTransfers.length === 0) {
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: tx.function,
+              inAmount: formatted,
+              inCurrency: token,
+              outAmount: '0',
+              outCurrency: 'EGLD',
+              fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0', // Gebyr kun på første linje
+              txHash: tx.txHash
+            });
+          }
+        } else {
+          // Fallback for transaksjoner uten ESDT-overføringer
           taxRelevantTransactions.push({
             timestamp: tx.timestamp,
             function: tx.function,
