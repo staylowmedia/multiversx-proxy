@@ -38,6 +38,7 @@ const validateWalletAddress = (address) => /^erd1[0-9a-z]{58}$/.test(address);
 function decodeHexToString(hex) { return Buffer.from(hex, 'hex').toString(); }
 function decodeHexToBigInt(hex) { return BigInt(`0x${hex}`); }
 function decodeBase64ToString(base64) { return Buffer.from(base64, 'base64').toString(); }
+function decodeBase64ToHex(base64) { return Buffer.from(base64, 'base64').toString('hex'); }
 
 async function fetchWithRetry(url, params, retries = 3, delayMs = 500) {
   for (let i = 0; i < retries; i++) {
@@ -169,26 +170,22 @@ app.post('/fetch-transactions', async (req, res) => {
             });
           }
         } else {
-          // Prøv results direkte for ESDT-overføringer
-          const esdtResults = scResults.filter(r => 
-            r.receiver === walletAddress && 
-            r.data && 
-            (r.data.startsWith('RVNEVFRyYW5zZmVy') || r.function === 'ESDTTransfer')
-          );
+          // Prøv logs.events med utvidet filter
+          const esdtEvents = logs.events?.filter(event => 
+            ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier)
+          ) || [];
 
-          if (esdtResults.length > 0) {
-            for (const [index, result] of esdtResults.entries()) {
-              const decodedData = decodeBase64ToString(result.data);
-              const parts = decodedData.split('@');
-              if (parts.length < 3) {
-                console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+          if (esdtEvents.length > 0) {
+            for (const [index, event] of esdtEvents.entries()) {
+              const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
+              const amountHex = event.topics?.[2] || '0';
+              const receiverBase64 = event.topics?.[3] || '';
+              const receiver = decodeBase64ToString(receiverBase64);
+              if (receiver !== walletAddress) {
+                console.warn(`⚠️ Skipping event for tx ${tx.txHash}, receiver ${receiver} does not match wallet ${walletAddress}`);
                 continue;
               }
-
-              const tokenHex = parts[1];
-              const amountHex = parts[2];
-              const token = decodeHexToString(tokenHex);
-              const amount = decodeHexToBigInt(amountHex);
+              const amount = decodeHexToBigInt(decodeBase64ToHex(amountHex));
               if (amount === BigInt(0)) {
                 console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
                 continue;
@@ -208,21 +205,25 @@ app.post('/fetch-transactions', async (req, res) => {
               });
             }
           } else {
-            // Prøv logs.events med utvidet filter
-            const esdtEvents = logs.events?.filter(event => 
-              ['ESDTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier) && 
-              (event.address === walletAddress || event.topics?.[2] === walletAddress)
-            ) || [];
+            // Prøv scResults som siste fallback
+            const esdtResults = scResults.filter(r => 
+              r.receiver === walletAddress && 
+              r.data && 
+              (r.data.startsWith('RVNEVFRyYW5zZmVy') || r.function === 'ESDTTransfer')
+            );
 
-            if (esdtEvents.length > 0) {
-              for (const [index, event] of esdtEvents.entries()) {
-                const token = event.topics?.[0] || 'UNKNOWN';
-                const amountHex = event.topics?.[1] || '0';
-                const receiver = event.topics?.[2] || event.address;
-                if (receiver !== walletAddress) {
-                  console.warn(`⚠️ Skipping event for tx ${tx.txHash}, receiver ${receiver} does not match wallet ${walletAddress}`);
+            if (esdtResults.length > 0) {
+              for (const [index, result] of esdtResults.entries()) {
+                const decodedData = decodeBase64ToString(result.data);
+                const parts = decodedData.split('@');
+                if (parts.length < 3) {
+                  console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
                   continue;
                 }
+
+                const tokenHex = parts[1];
+                const amountHex = parts[2];
+                const token = decodeHexToString(tokenHex);
                 const amount = decodeHexToBigInt(amountHex);
                 if (amount === BigInt(0)) {
                   console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
