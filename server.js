@@ -40,16 +40,32 @@ function decodeHexToString(hex) { return Buffer.from(hex, 'hex').toString(); }
 function decodeHexToBigInt(hex) { return BigInt(`0x${hex}`); }
 function decodeBase64ToString(base64) { return Buffer.from(base64, 'base64').toString(); }
 
-const getTokenDecimals = async (tokenId, cacheMap) => {
-  if (cacheMap[tokenId]) return cacheMap[tokenId];
-  try {
-    const { data } = await axios.get(`https://api.multiversx.com/tokens/${tokenId}`);
-    cacheMap[tokenId] = data.decimals;
-    return data.decimals;
-  } catch (e) {
-    return 18;
+function parseScResults(scResults, walletAddress, tokenDecimalsCache) {
+  const rewards = [];
+  for (const scr of scResults) {
+    const { data, receiver } = scr;
+    if (!data) continue;
+    const decoded = data.split('@');
+    const tokenHex = decoded[1];
+    const amountHex = decoded[2];
+    if (!tokenHex || !amountHex) continue;
+    const token = decodeHexToString(tokenHex);
+    let amount = new BigNumber(decodeHexToBigInt(amountHex).toString());
+
+    if (!tokenDecimalsCache[token]) {
+      tokenDecimalsCache[token] = 18;
+      try {
+        const meta = await axios.get(`https://api.multiversx.com/tokens/${token}`);
+        tokenDecimalsCache[token] = meta.data.decimals;
+      } catch (e) { }
+    }
+
+    const decimals = tokenDecimalsCache[token];
+    amount = amount.dividedBy(new BigNumber(10).pow(decimals));
+    rewards.push({ token, amount });
   }
-};
+  return rewards;
+}
 
 app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate, clientId } = req.body;
@@ -127,37 +143,13 @@ app.post('/fetch-transactions', async (req, res) => {
       'buy', 'sell', 'withdraw', 'claimlockedassets'
     ];
 
-    const taxRelevantTransactions = [];
+    const taxRelevantTransactions = allTransactions.filter(tx => {
+      const func = tx.function?.toLowerCase() || '';
+      return (tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp) &&
+             (transfers.some(t => t.txHash === tx.txHash) || taxRelevantFunctions.includes(func));
+    });
 
-    for (const tx of allTransactions) {
-      if (!taxRelevantFunctions.includes((tx.function || '').toLowerCase())) continue;
-      if (tx.timestamp < startTimestamp || tx.timestamp > endTimestamp) continue;
-
-      const scResults = tx.scResults || [];
-      for (const sc of scResults) {
-        const parts = sc.data?.split('@');
-        if (parts?.[0] === 'ESDTNFTTransfer' && parts.length >= 3) {
-          const tokenId = decodeHexToString(parts[1]);
-          const amount = decodeHexToBigInt(parts[2]);
-          const decimals = await getTokenDecimals(tokenId, tokenDecimalsCache);
-          const value = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
-
-          taxRelevantTransactions.push({
-            timestamp: tx.timestamp,
-            function: tx.function,
-            inAmount: value,
-            inCurrency: tokenId,
-            outAmount: '0',
-            outCurrency: 'EGLD',
-            fee: tx.fee,
-            txHash: tx.txHash
-          });
-          break;
-        }
-      }
-    }
-
-    reportProgress(clientId, `✅ Parsed ${taxRelevantTransactions.length} tax-relevant transactions.`);
+    reportProgress(clientId, `✅ Filtered ${taxRelevantTransactions.length} tax-relevant transactions.`);
     reportProgress(clientId, '✅ Done');
 
     res.json({ allTransactions, taxRelevantTransactions });
