@@ -45,6 +45,7 @@ async function fetchWithRetry(url, params, retries = 3, delayMs = 500) {
       const response = await axios.get(url, { params });
       return response;
     } catch (err) {
+      console.warn(`⚠️ API retry ${i + 1} failed for ${url}:`, err.message);
       if (i === retries - 1) throw err;
       await delay(delayMs * Math.pow(2, i));
     }
@@ -95,7 +96,7 @@ app.post('/fetch-transactions', async (req, res) => {
   let allTransactions = [], tokenDecimalsCache = {};
 
   try {
-    await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
+    await fetchWithRetry(`https://api.multiversx.com/accounts/${walletAddress}`, {});
 
     reportProgress(clientId, '🔍 Henter transaksjoner...');
     const pageSize = 1000;
@@ -129,29 +130,27 @@ app.post('/fetch-transactions', async (req, res) => {
       if (!isTaxRelevant) continue;
 
       try {
-        const detailed = await fetchWithRetry(`https://api.multiversx.com/transactions/${tx.txHash}?withOperations=true`, {});
+        const detailed = await fetchWithRetry(`https://api.multiversx.com/transactions/${tx.txHash}?withOperations=true&withLogs=true`, {});
         const scResults = detailed.data.results || [];
         const operations = detailed.data.operations || [];
+        const logs = detailed.data.logs || { events: [] };
 
         // Log rådata for feilsøking (fjern i produksjon)
         console.log(`scResults for tx ${tx.txHash}:`, JSON.stringify(scResults, null, 2));
         console.log(`Operations for tx ${tx.txHash}:`, JSON.stringify(operations, null, 2));
+        console.log(`Logs for tx ${tx.txHash}:`, JSON.stringify(logs, null, 2));
 
         // Håndter token-overføringer fra operations
         let tokenTransfers = operations.filter(op => 
-          (op.action === 'transfer' || op.action === 'ESDTTransfer') && 
           op.type === 'esdt' && 
-          op.receiver === walletAddress // Kun overføringer til lommeboken
+          op.receiver === walletAddress && 
+          op.value && BigInt(op.value) > 0
         );
 
         if (tokenTransfers.length > 0) {
           for (const [index, op] of tokenTransfers.entries()) {
-            const token = op.identifier || op.name;
-            const amount = BigInt(op.value || '0');
-            if (amount === BigInt(0)) {
-              console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
-              continue;
-            }
+            const token = op.identifier || op.name || 'UNKNOWN';
+            const amount = BigInt(op.value);
             const decimals = await getTokenDecimals(token, tokenDecimalsCache);
             const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
@@ -162,28 +161,21 @@ app.post('/fetch-transactions', async (req, res) => {
               inCurrency: token,
               outAmount: '0',
               outCurrency: 'EGLD',
-              fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0', // Gebyr kun på første linje
+              fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
               txHash: tx.txHash
             });
           }
         } else {
-          // Prøv scResults som fallback
-          const esdtTransfers = scResults.filter(r => r.data && (
-            r.data.startsWith('RVNEVFRyYW5zZmVy') || // ESDTTransfer
-            r.data.includes('transfer') // Mer fleksibel sjekk
-          ));
-          if (esdtTransfers.length > 0) {
-            for (const [index, result] of esdtTransfers.entries()) {
-              const decodedData = decodeBase64ToString(result.data);
-              const parts = decodedData.split('@');
-              if (parts.length < 3) {
-                console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
-                continue;
-              }
+          // Prøv logs.events som fallback
+          const esdtEvents = logs.events?.filter(event => 
+            event.identifier === 'ESDTTransfer' && 
+            event.address === walletAddress
+          ) || [];
 
-              const tokenHex = parts[1];
-              const amountHex = parts[2];
-              const token = decodeHexToString(tokenHex);
+          if (esdtEvents.length > 0) {
+            for (const [index, event] of esdtEvents.entries()) {
+              const token = event.topics?.[0] || 'UNKNOWN';
+              const amountHex = event.topics?.[1] || '0';
               const amount = decodeHexToBigInt(amountHex);
               if (amount === BigInt(0)) {
                 console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
@@ -204,18 +196,55 @@ app.post('/fetch-transactions', async (req, res) => {
               });
             }
           } else {
-            // Fallback for transaksjoner uten token-overføringer
-            console.warn(`⚠️ No token transfers found for tx ${tx.txHash}, using fallback`);
-            taxRelevantTransactions.push({
-              timestamp: tx.timestamp,
-              function: tx.function,
-              inAmount: '0',
-              inCurrency: 'EGLD',
-              outAmount: '0',
-              outCurrency: 'EGLD',
-              fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-              txHash: tx.txHash
-            });
+            // Prøv scResults som siste fallback
+            const esdtTransfers = scResults.filter(r => r.data && (
+              r.data.startsWith('RVNEVFRyYW5zZmVy') || 
+              r.data.includes('transfer')
+            ));
+            if (esdtTransfers.length > 0) {
+              for (const [index, result] of esdtTransfers.entries()) {
+                const decodedData = decodeBase64ToString(result.data);
+                const parts = decodedData.split('@');
+                if (parts.length < 3) {
+                  console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+                  continue;
+                }
+
+                const tokenHex = parts[1];
+                const amountHex = parts[2];
+                const token = decodeHexToString(tokenHex);
+                const amount = decodeHexToBigInt(amountHex);
+                if (amount === BigInt(0)) {
+                  console.warn(`⚠️ Null amount for token ${token} in tx ${tx.txHash}`);
+                  continue;
+                }
+                const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+                const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+                taxRelevantTransactions.push({
+                  timestamp: tx.timestamp,
+                  function: tx.function,
+                  inAmount: formatted,
+                  inCurrency: token,
+                  outAmount: '0',
+                  outCurrency: 'EGLD',
+                  fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+                  txHash: tx.txHash
+                });
+              }
+            } else {
+              console.warn(`⚠️ No token transfers found for tx ${tx.txHash}, using fallback`);
+              taxRelevantTransactions.push({
+                timestamp: tx.timestamp,
+                function: tx.function,
+                inAmount: '0',
+                inCurrency: 'EGLD',
+                outAmount: '0',
+                outCurrency: 'EGLD',
+                fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+                txHash: tx.txHash
+              });
+            }
           }
         }
       } catch (err) {
@@ -228,7 +257,7 @@ app.post('/fetch-transactions', async (req, res) => {
     reportProgress(clientId, '✅ Fullført');
     res.json(result);
   } catch (error) {
-    console.error('❌ Feil i fetch-transactions:', error);
+    console.error('❌ Feil i fetch-transactions:', error.message);
     reportProgress(clientId, '❌ Mislyktes');
     res.status(500).json({ error: 'Kunne ikke hente transaksjoner. Prøv igjen senere.' });
   }
