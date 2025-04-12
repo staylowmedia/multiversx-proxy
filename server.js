@@ -1,5 +1,4 @@
-// server.js
-const express = require('express');
+""const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
 const cors = require('cors');
@@ -117,53 +116,50 @@ app.post('/fetch-transactions', async (req, res) => {
       'buy', 'sell', 'withdraw', 'claimlockedassets'
     ];
 
-    const taxRelevantTransactions = allTransactions.filter(tx => {
-      const func = tx.function?.toLowerCase() || '';
-      return (tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp) &&
-             (transfers.some(t => t.txHash === tx.txHash) || taxRelevantFunctions.includes(func));
-    });
+    const taxRelevantTransactions = [];
+    for (const tx of allTransactions) {
+      const isRelevant = taxRelevantFunctions.includes(tx.function?.toLowerCase() || '');
+      const hasTransfer = transfers.some(t => t.txHash === tx.txHash);
+      const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
+      if (withinDate && (isRelevant || hasTransfer)) {
+        tx.inAmount = '0';
+        tx.inCurrency = 'EGLD';
+        tx.outAmount = '0';
+        tx.outCurrency = 'EGLD';
 
-    for (let tx of taxRelevantTransactions) {
-      tx.inAmount = '0';
-      tx.inCurrency = 'EGLD';
-      tx.outAmount = '0';
-      tx.outCurrency = 'EGLD';
+        try {
+          const { data } = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
+          const results = data.results || [];
 
-      try {
-        const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-        let scResults = detailed.data.results || [];
+          for (const scr of results) {
+            if (!scr.data || scr.receiver !== walletAddress) continue;
 
-        for (const scr of scResults) {
-          if (!scr.data) continue;
-          const decoded = decodeBase64ToString(scr.data);
-          const parts = decoded.split('@');
-          const callType = parts[0].toLowerCase();
+            const decoded = decodeBase64ToString(scr.data);
+            const parts = decoded.split('@');
+            if (parts[0] !== 'ESDTNFTTransfer' || parts.length < 3) continue;
 
-          if (callType === 'esdttransfer' || callType === 'multiesdtnfttransfer') {
-            if (parts.length < 3) continue;
             const tokenHex = parts[1];
             const amountHex = parts[2];
             const token = decodeHexToString(tokenHex);
-            const amount = decodeHexToBigInt(amountHex);
 
-            const decimals = tokenDecimalsCache[token] || (await axios.get(`https://api.multiversx.com/tokens/${token}`).then(r => r.data.decimals).catch(() => 18));
+            // Skip LP tokens
+            if (token.includes('LP') || token.includes('FL')) continue;
+
+            const amount = decodeHexToBigInt(amountHex);
+            const decimals = tokenDecimalsCache[token] ?? (await axios.get(`https://api.multiversx.com/tokens/${token}`).then(r => r.data.decimals).catch(() => 18));
             tokenDecimalsCache[token] = decimals;
 
-            const formattedAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
-
-            if (scr.receiver === walletAddress && amount > 0n && formattedAmount !== '0') {
-              tx.inAmount = formattedAmount;
+            const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+            if (formatted !== '0') {
+              tx.inAmount = formatted;
               tx.inCurrency = token;
             }
-
-            if (scr.sender === walletAddress && amount > 0n && formattedAmount !== '0') {
-              tx.outAmount = formattedAmount;
-              tx.outCurrency = token;
-            }
           }
+        } catch (err) {
+          console.warn(`Error decoding tx ${tx.txHash}: ${err.message}`);
         }
-      } catch (e) {
-        console.warn(`⚠️ Error fetching or parsing SCResults for ${tx.txHash}:`, e.message);
+
+        taxRelevantTransactions.push(tx);
       }
     }
 
