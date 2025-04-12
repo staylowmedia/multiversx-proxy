@@ -132,14 +132,21 @@ app.post('/fetch-transactions', async (req, res) => {
         const detailed = await fetchWithRetry(`https://api.multiversx.com/transactions/${tx.txHash}`, {});
         const scResults = detailed.data.results || [];
 
-        const esdtTransfers = scResults.filter(r => r.data?.startsWith('ESDTTransfer'));
+        // Log rådata for feilsøking (fjern i produksjon)
+        console.log(`scResults for tx ${tx.txHash}:`, scResults);
+
+        // Filter for ESDTTransfer (base64 for "ESDTTransfer" = "RVNEVFRyYW5zZmVy")
+        const esdtTransfers = scResults.filter(r => r.data && r.data.startsWith('RVNEVFRyYW5zZmVy'));
 
         if (esdtTransfers.length > 0) {
           // Behandle hver token-overføring som en separat transaksjon
           for (const [index, result] of esdtTransfers.entries()) {
             const decodedData = decodeBase64ToString(result.data);
             const parts = decodedData.split('@');
-            if (parts.length < 3) continue;
+            if (parts.length < 3) {
+              console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+              continue;
+            }
 
             const tokenHex = parts[1];
             const amountHex = parts[2];
