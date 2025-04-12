@@ -1,9 +1,8 @@
-// server.js
 const express = require('express');
 const axios = require('axios');
+const NodeCache = require('node-cache');
 const cors = require('cors');
 const BigNumber = require('bignumber.js');
-const NodeCache = require('node-cache');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
@@ -22,7 +21,9 @@ app.get('/progress/:id', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
 
   const id = req.params.id;
-  clientProgress.set(id, msg => res.write(`data: ${msg}\n\n`));
+  const send = msg => res.write(`data: ${msg}\n\n`);
+  clientProgress.set(id, send);
+  send('🔌 Connected to proxy...');
 
   req.on('close', () => {
     clientProgress.delete(id);
@@ -34,19 +35,10 @@ function reportProgress(clientId, message) {
   if (sender) sender(message);
 }
 
-function decodeHexToString(hex) {
-  return Buffer.from(hex, 'hex').toString();
-}
-
-function decodeHexToBigInt(hex) {
-  return BigInt(`0x${hex}`);
-}
-
-function decodeBase64ToString(base64) {
-  return Buffer.from(base64, 'base64').toString();
-}
-
-const validateWalletAddress = address => /^erd1[0-9a-z]{58}$/.test(address);
+const validateWalletAddress = (address) => /^erd1[0-9a-z]{58}$/.test(address);
+function decodeHexToString(hex) { return Buffer.from(hex, 'hex').toString(); }
+function decodeHexToBigInt(hex) { return BigInt(`0x${hex}`); }
+function decodeBase64ToString(base64) { return Buffer.from(base64, 'base64').toString(); }
 
 app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate, clientId } = req.body;
@@ -55,6 +47,7 @@ app.post('/fetch-transactions', async (req, res) => {
     return res.status(400).json({ error: 'Missing required parameters' });
   }
 
+  reportProgress(clientId, '📡 Validating address...');
   if (!validateWalletAddress(walletAddress)) {
     return res.status(400).json({ error: 'Invalid wallet address' });
   }
@@ -64,15 +57,17 @@ app.post('/fetch-transactions', async (req, res) => {
   const startTimestamp = Math.floor(fromDateObj.getTime() / 1000);
   const endTimestamp = Math.floor(toDateObj.getTime() / 1000);
 
-  let allTransactions = [];
-  let transfers = [];
-  let tokenDecimalsCache = {};
+  if (fromDateObj > toDateObj) {
+    return res.status(400).json({ error: 'Invalid date range' });
+  }
+
+  let allTransactions = [], transfers = [], tokenDecimalsCache = {};
 
   try {
-    reportProgress(clientId, `📡 Verifying account ${walletAddress}`);
     await axios.get(`https://api.multiversx.com/accounts/${walletAddress}`);
 
-    const pageSize = 100;
+    reportProgress(clientId, '🔍 Fetching transactions...');
+    const pageSize = 1000;
     for (let fromIndex = 0; fromIndex < 10000; fromIndex += pageSize) {
       const params = {
         after: startTimestamp,
@@ -89,6 +84,7 @@ app.post('/fetch-transactions', async (req, res) => {
       if (batch.length < pageSize) break;
     }
 
+    reportProgress(clientId, '🔄 Fetching transfers...');
     const SECONDS_IN_DAY = 86400;
     for (let ts = startTimestamp; ts < endTimestamp; ts += SECONDS_IN_DAY) {
       const chunkStart = ts;
@@ -120,88 +116,106 @@ app.post('/fetch-transactions', async (req, res) => {
       'buy', 'sell', 'withdraw', 'claimlockedassets'
     ];
 
-    const taxRelevantTransactions = allTransactions.filter(tx => {
-      const func = tx.function?.toLowerCase() || '';
-      return (tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp) &&
-        (transfers.some(t => t.txHash === tx.txHash) || taxRelevantFunctions.includes(func));
-    });
+    const fetchTokenDecimals = async (token) => {
+      if (tokenDecimalsCache[token]) return tokenDecimalsCache[token];
+      try {
+        const res = await axios.get(`https://api.multiversx.com/tokens/${token}`);
+        const decimals = res.data.decimals || 18;
+        tokenDecimalsCache[token] = decimals;
+        return decimals;
+      } catch {
+        return 18;
+      }
+    };
 
-    for (let tx of taxRelevantTransactions) {
+    const taxRelevantTransactions = [];
+    for (const tx of allTransactions) {
+      const withinDate = tx.timestamp >= startTimestamp && tx.timestamp <= endTimestamp;
+      const isRelevant = transfers.some(t => t.txHash === tx.txHash) || taxRelevantFunctions.includes(tx.function?.toLowerCase());
+      if (!withinDate || !isRelevant) continue;
+
       tx.inAmount = '0';
       tx.inCurrency = 'EGLD';
       tx.outAmount = '0';
       tx.outCurrency = 'EGLD';
 
       const related = transfers.filter(t => t.txHash === tx.txHash);
-      const inTransfer = related.find(t => t.receiver === walletAddress);
-      const outTransfer = related.find(t => t.sender === walletAddress);
+      const inT = related.find(t => t.receiver === walletAddress);
+      const outT = related.find(t => t.sender === walletAddress);
 
-      const handleTransfer = async (transfer, isIn) => {
+      const processTransfer = async (transfer, isIn) => {
         if (!transfer) return;
-        let identifier = transfer.identifier || 'EGLD';
+        let id = transfer.identifier || 'EGLD';
         let value = transfer.value;
 
-        if (transfer.data && transfer.data.startsWith('RVNEVFRyYW5zZmVy')) {
-          const decodedData = decodeBase64ToString(transfer.data);
-          const parts = decodedData.split('@');
-          if (parts[0] === 'ESDTTransfer' && parts.length >= 3) {
-            identifier = decodeHexToString(parts[1]);
+        if (transfer.data?.startsWith('RVNEVFRyYW5zZmVy')) {
+          const parts = decodeBase64ToString(transfer.data).split('@');
+          if (parts.length >= 3) {
+            id = decodeHexToString(parts[1]);
             value = decodeHexToBigInt(parts[2]).toString();
           }
         }
 
         if (value && value !== '0') {
-          const decimals = tokenDecimalsCache[identifier] || 18;
-          const formatted = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
-          if (isIn) {
-            tx.inAmount = formatted;
-            tx.inCurrency = identifier;
-          } else {
-            tx.outAmount = formatted;
-            tx.outCurrency = identifier;
+          const decimals = await fetchTokenDecimals(id);
+          const amount = new BigNumber(value).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+          if (isIn && tx.inAmount === '0') {
+            tx.inAmount = amount;
+            tx.inCurrency = id;
+          } else if (!isIn && tx.outAmount === '0') {
+            tx.outAmount = amount;
+            tx.outCurrency = id;
           }
         }
       };
 
-      await handleTransfer(inTransfer, true);
-      await handleTransfer(outTransfer, false);
+      await processTransfer(inT, true);
+      await processTransfer(outT, false);
 
       try {
-        const details = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
-        const results = details.data.results || [];
+        const detailed = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}`);
+        const scResults = detailed.data.results || [];
 
-        for (const scr of results) {
-          const data = decodeBase64ToString(scr.data || '');
-          if (data.startsWith('ESDTTransfer@') || data.startsWith('MultiESDTNFTTransfer@')) {
-            const parts = data.split('@');
-            if (parts.length >= 3) {
-              const token = decodeHexToString(parts[1]);
-              const amount = decodeHexToBigInt(parts[2]);
-              const decimals = tokenDecimalsCache[token] || 18;
-              const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
-              if (scr.receiver === walletAddress && tx.inAmount === '0') {
-                tx.inAmount = formatted;
-                tx.inCurrency = token;
-              }
-              if (scr.sender === walletAddress && tx.outAmount === '0') {
-                tx.outAmount = formatted;
-                tx.outCurrency = token;
-              }
-            }
+        const rewardSums = {};
+
+        for (const scr of scResults) {
+          if (!scr.data || !scr.data.startsWith('RVNEVFRyYW5zZmVy')) continue;
+          const decoded = decodeBase64ToString(scr.data);
+          const parts = decoded.split('@');
+          if (parts.length >= 3) {
+            const token = decodeHexToString(parts[1]);
+            const raw = decodeHexToBigInt(parts[2]);
+            if (!rewardSums[token]) rewardSums[token] = BigInt(0);
+            rewardSums[token] += raw;
           }
         }
-      } catch (err) {
-        console.warn(`Failed to fetch SC results for ${tx.txHash}`);
+
+        for (const [token, total] of Object.entries(rewardSums)) {
+          const decimals = await fetchTokenDecimals(token);
+          const amount = new BigNumber(total.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed(decimals);
+          if (amount !== '0') {
+            tx.inAmount = amount;
+            tx.inCurrency = token;
+          }
+        }
+      } catch (e) {
+        console.warn(`Could not parse SCResults for ${tx.txHash}`);
       }
+
+      taxRelevantTransactions.push(tx);
     }
 
-    reportProgress(clientId, `✅ Done!`);
+    reportProgress(clientId, `✅ Found ${taxRelevantTransactions.length} tax-relevant transactions.`);
+    reportProgress(clientId, '✅ Done');
     res.json({ allTransactions, taxRelevantTransactions });
-  } catch (err) {
-    console.error('❌ Error:', err.message);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error('❌ Error in fetch-transactions:', error);
+    reportProgress(clientId, '❌ Failed');
+    res.status(500).json({ error: error.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Proxy server running on port ${PORT}`);
+});
