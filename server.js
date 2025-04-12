@@ -129,29 +129,21 @@ app.post('/fetch-transactions', async (req, res) => {
       if (!isTaxRelevant) continue;
 
       try {
-        const detailed = await fetchWithRetry(`https://api.multiversx.com/transactions/${tx.txHash}`, {});
+        const detailed = await fetchWithRetry(`https://api.multiversx.com/transactions/${tx.txHash}?withOperations=true`, {});
         const scResults = detailed.data.results || [];
+        const operations = detailed.data.operations || [];
 
         // Log rådata for feilsøking (fjern i produksjon)
         console.log(`scResults for tx ${tx.txHash}:`, scResults);
+        console.log(`Operations for tx ${tx.txHash}:`, operations);
 
-        // Filter for ESDTTransfer (base64 for "ESDTTransfer" = "RVNEVFRyYW5zZmVy")
-        const esdtTransfers = scResults.filter(r => r.data && r.data.startsWith('RVNEVFRyYW5zZmVy'));
+        // Håndter token-overføringer fra operations
+        let tokenTransfers = operations.filter(op => op.action === 'transfer' && op.type === 'esdt');
 
-        if (esdtTransfers.length > 0) {
-          // Behandle hver token-overføring som en separat transaksjon
-          for (const [index, result] of esdtTransfers.entries()) {
-            const decodedData = decodeBase64ToString(result.data);
-            const parts = decodedData.split('@');
-            if (parts.length < 3) {
-              console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
-              continue;
-            }
-
-            const tokenHex = parts[1];
-            const amountHex = parts[2];
-            const token = decodeHexToString(tokenHex);
-            const amount = decodeHexToBigInt(amountHex);
+        if (tokenTransfers.length > 0) {
+          for (const [index, op] of tokenTransfers.entries()) {
+            const token = op.identifier || op.name;
+            const amount = BigInt(op.value || '0');
             const decimals = await getTokenDecimals(token, tokenDecimalsCache);
             const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
@@ -167,20 +159,51 @@ app.post('/fetch-transactions', async (req, res) => {
             });
           }
         } else {
-          // Fallback for transaksjoner uten ESDT-overføringer
-          taxRelevantTransactions.push({
-            timestamp: tx.timestamp,
-            function: tx.function,
-            inAmount: '0',
-            inCurrency: 'EGLD',
-            outAmount: '0',
-            outCurrency: 'EGLD',
-            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-            txHash: tx.txHash
-          });
+          // Prøv scResults som fallback
+          const esdtTransfers = scResults.filter(r => r.data && r.data.startsWith('RVNEVFRyYW5zZmVy'));
+          if (esdtTransfers.length > 0) {
+            for (const [index, result] of esdtTransfers.entries()) {
+              const decodedData = decodeBase64ToString(result.data);
+              const parts = decodedData.split('@');
+              if (parts.length < 3) {
+                console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+                continue;
+              }
+
+              const tokenHex = parts[1];
+              const amountHex = parts[2];
+              const token = decodeHexToString(tokenHex);
+              const amount = decodeHexToBigInt(amountHex);
+              const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+              const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+              taxRelevantTransactions.push({
+                timestamp: tx.timestamp,
+                function: tx.function,
+                inAmount: formatted,
+                inCurrency: token,
+                outAmount: '0',
+                outCurrency: 'EGLD',
+                fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+                txHash: tx.txHash
+              });
+            }
+          } else {
+            // Fallback for transaksjoner uten token-overføringer
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: tx.function,
+              inAmount: '0',
+              inCurrency: 'EGLD',
+              outAmount: '0',
+              outCurrency: 'EGLD',
+              fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+              txHash: tx.txHash
+            });
+          }
         }
       } catch (err) {
-        console.warn(`⚠️ Kunne ikke hente SC-resultat for tx ${tx.txHash}:`, err.message);
+        console.warn(`⚠️ Kunne ikke hente detaljer for tx ${tx.txHash}:`, err.message);
       }
     }
 
