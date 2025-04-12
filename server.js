@@ -99,7 +99,7 @@ app.post('/fetch-transactions', async (req, res) => {
 
     reportProgress(clientId, '🔍 Henter transaksjoner...');
     const pageSize = 1000;
-    for (let fromIndex = 0; fromIndex < 10000; fromIndex += pageSize) {
+    for let fromIndex = 0; fromIndex < 10000; fromIndex += pageSize) {
       const params = {
         after: startTimestamp,
         before: endTimestamp,
@@ -138,7 +138,11 @@ app.post('/fetch-transactions', async (req, res) => {
         console.log(`Operations for tx ${tx.txHash}:`, operations);
 
         // Håndter token-overføringer fra operations
-        let tokenTransfers = operations.filter(op => op.action === 'transfer' && op.type === 'esdt');
+        let tokenTransfers = operations.filter(op => 
+          op.action === 'transfer' && 
+          op.type === 'esdt' && 
+          op.receiver === walletAddress // Kun overføringer til lommeboken
+        );
 
         if (tokenTransfers.length > 0) {
           for (const [index, op] of tokenTransfers.entries()) {
