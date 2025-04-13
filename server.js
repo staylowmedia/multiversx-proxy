@@ -218,7 +218,10 @@ app.post('/fetch-transactions', async (req, res) => {
              '41300520b7ae6fdfbc9fb8e1e551fa0a86c35c3f5d548a14e9797104e93bf0b6',
              'b27f6ee98aa7b815d8ff5381e0b14257d9b057ef5797e4ebd10654e1ff11be96',
              'd51b0d4f04ca502a9881d3c686ff3aa339a3c61749878e67244d79047fdc84c1',
-             'b13e89d95cfd7c4d3db8920a3fd9daf299d98dcdfbcc51ed2194a5d136bb6b1f'].includes(tx.txHash)) {
+             'b13e89d95cfd7c4d3db8920a3fd9daf299d98dcdfbcc51ed2194a5d136bb6b1f',
+             '3978c429a0a9e9004a819a5d70c297bccfd40629e566c889a3a15d1c0115c0fb',
+             '4bd2be4985c6cbf6fdadeb68f2593e9d7fb94b2952c4800f4e1a5030945cbb7f',
+             '20b57c15bd2a0de05f476b1169f42283e6c345c6e3cae90a0a10bd01f9a63496'].includes(tx.txHash)) {
           console.log(`Full response for tx ${tx.txHash}:`, JSON.stringify(detailed.data, null, 2));
         }
 
@@ -264,9 +267,13 @@ app.post('/fetch-transactions', async (req, res) => {
         if (['claimrewards', 'claimrewardsproxy'].includes(func)) {
           console.log(`Processing ${func} for tx ${tx.txHash}: egld=${JSON.stringify(egldTransfersIn)}, tokens=${JSON.stringify(tokenTransfersIn)}`);
           
-          // Prioriter ikke-LP-tokens som belønning
-          const lpTokenPattern = /FARM/;
-          const rewardTokens = ['XMEX-fda355', 'MEX-455c57', 'UTK-2f80e9', 'ZPAY-247875', 'QWT-46ac01']; // Kjente belønningstokens
+          // Definer kjente belønningstokens
+          const rewardTokens = [
+            'XMEX-fda355', 'MEX-455c57', 'UTK-2f80e9', 'ZPAY-247875', 'QWT-46ac01',
+            'RIDE-7d18e9', 'CRT-a28d59', 'CYBER-5d1f4a', 'AERO-458b36', 'ISET-83f339',
+            'BHAT-c1fde3', 'SFIT-dcbf2a'
+          ];
+          const lpTokenPattern = /(FARM|FL-|EGLD.*FL-|WEGLD.*FL)/i; // Matcher FARM, FL-, EGLD*FL-, WEGLD*FL-
           let hasAddedReward = false;
 
           // Prøv kjente belønningstokens først
@@ -294,7 +301,7 @@ app.post('/fetch-transactions', async (req, res) => {
             }
           }
 
-          // Hvis ingen kjent belønningstoken, håndter andre tokens
+          // Hvis ingen kjent belønningstoken, prøv ikke-LP-tokens
           if (!hasAddedReward) {
             for (const [index, op] of tokenTransfersIn.entries()) {
               const token = op.identifier || op.name || 'UNKNOWN';
@@ -316,10 +323,56 @@ app.post('/fetch-transactions', async (req, res) => {
                 fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
                 txHash: tx.txHash
               });
+              hasAddedReward = true;
               console.log(`Added fallback reward token ${token} for tx ${tx.txHash}`);
             }
           }
-          // Fortsett til neste behandling (ikke hopp over hele transaksjonen)
+
+          // Hvis ingen belønning lagt til ennå, sjekk logs.events
+          if (!hasAddedReward) {
+            const esdtEvents = logs.events?.filter(event => 
+              ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier) &&
+              decodeBase64ToString(event.topics?.[3] || '') === walletAddress
+            ) || [];
+
+            for (const event of esdtEvents) {
+              const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
+              if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
+                console.warn(`⚠️ Skipping LP or unknown token ${token} in logs for ${func} tx ${tx.txHash}`);
+                continue;
+              }
+              const amountHex = event.topics?.[2] || '0';
+              let amount = BigInt(0);
+              try {
+                amount = decodeHexToBigInt(decodeBase64ToHex(amountHex));
+              } catch (err) {
+                console.warn(`⚠️ Failed to decode amount for tx ${tx.txHash}:`, err.message);
+                continue;
+              }
+              if (amount <= BigInt(0)) {
+                console.warn(`⚠️ Null or negative amount for token ${token} in tx ${tx.txHash}`);
+                continue;
+              }
+
+              const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+              const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+              taxRelevantTransactions.push({
+                timestamp: tx.timestamp,
+                function: func,
+                inAmount: formatted,
+                inCurrency: token,
+                outAmount: '0',
+                outCurrency: 'EGLD',
+                fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+                txHash: tx.txHash
+              });
+              hasAddedReward = true;
+              console.log(`Added reward token ${token} from logs for tx ${tx.txHash}`);
+              break;
+            }
+          }
+          // Fortsett til neste behandling
         }
 
         // Spesifikk håndtering for wrapEgld
@@ -369,9 +422,7 @@ app.post('/fetch-transactions', async (req, res) => {
             if (tokenTransfersOut.length > 0) {
               const primaryOut = tokenTransfersOut.reduce((max, op) => 
                 BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersOut[0]);
-             
-
- const outToken = primaryOut.identifier || 'UNKNOWN';
+              const outToken = primaryOut.identifier || 'UNKNOWN';
               if (outToken !== 'UNKNOWN') {
                 const outAmountBig = BigInt(primaryOut.value);
                 const outDecimals = await getTokenDecimals(outToken, tokenDecimalsCache);
@@ -443,7 +494,7 @@ app.post('/fetch-transactions', async (req, res) => {
           });
         }
 
-        // Prøv logs.events
+        // Prøv logs.events for andre transaksjoner
         const esdtEvents = logs.events?.filter(event => 
           ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier)
         ) || [];
