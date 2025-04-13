@@ -41,16 +41,45 @@ function decodeBase64ToString(base64) { try { return Buffer.from(base64, 'base64
 function decodeBase64ToHex(base64) { try { return Buffer.from(base64, 'base64').toString('hex'); } catch { return '0'; } }
 
 function deduplicateTransactions(transactions) {
-  const seen = new Set();
-  return transactions.filter(tx => {
-    const key = `${tx.txHash}:${tx.function}:${tx.inAmount}:${tx.inCurrency}:${tx.outAmount}:${tx.outCurrency}`;
-    if (seen.has(key)) {
-      console.log(`⚠️ Removed duplicate: ${key}`);
-      return false;
+  const seen = new Map();
+  const result = [];
+
+  for (const tx of transactions) {
+    const key = `${tx.txHash}:${tx.function}`;
+    if (!seen.has(key)) {
+      seen.set(key, { ...tx, inAmounts: [], outAmounts: [] });
+      result.push(seen.get(key));
+    } else {
+      const existing = seen.get(key);
+      // Kombiner inn- og ut-verdier
+      if (tx.inAmount !== '0' && !existing.inAmounts.some(a => a.amount === tx.inAmount && a.currency === tx.inCurrency)) {
+        if (existing.inAmount === '0') {
+          existing.inAmount = tx.inAmount;
+          existing.inCurrency = tx.inCurrency;
+        }
+        existing.inAmounts.push({ amount: tx.inAmount, currency: tx.inCurrency });
+      }
+      if (tx.outAmount !== '0' && !existing.outAmounts.some(a => a.amount === tx.outAmount && a.currency === tx.outCurrency)) {
+        if (existing.outAmount === '0') {
+          existing.outAmount = tx.outAmount;
+          existing.outCurrency = tx.outCurrency;
+        }
+        existing.outAmounts.push({ amount: tx.outAmount, currency: tx.outCurrency });
+      }
+      console.log(`⚠️ Merged transaction: ${key}, in=${tx.inAmount} ${tx.inCurrency}, out=${tx.outAmount} ${tx.outCurrency}`);
     }
-    seen.add(key);
-    return true;
-  });
+  }
+
+  return result.map(tx => ({
+    timestamp: tx.timestamp,
+    function: tx.function,
+    inAmount: tx.inAmount,
+    inCurrency: tx.inCurrency,
+    outAmount: tx.outAmount,
+    outCurrency: tx.outCurrency,
+    fee: tx.fee,
+    txHash: tx.txHash
+  }));
 }
 
 async function fetchWithRetry(url, params, retries = 3, delayMs = 500) {
@@ -218,7 +247,6 @@ app.post('/fetch-transactions', async (req, res) => {
             const decimals = await getTokenDecimals(inOp.identifier, tokenDecimalsCache);
             inAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
             inCurrency = inOp.identifier;
-            tokenTransfersIn = tokenTransfersIn.filter(op => op !== inOp);
           }
 
           taxRelevantTransactions.push({
@@ -231,14 +259,14 @@ app.post('/fetch-transactions', async (req, res) => {
             fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
             txHash: tx.txHash
           });
-          continue; // Hopp over videre behandling
+          continue;
         }
 
         // Håndter swaps
         if (['swap_tokens_fixed_input', 'swap_tokens_fixed_output', 'multipairswap'].includes(func)) {
           console.log(`Processing swap for tx ${tx.txHash}: in=${JSON.stringify(tokenTransfersIn)}, out=${JSON.stringify(tokenTransfersOut)}`);
           if (tokenTransfersIn.length > 0) {
-            // Velg den største inn-overføringen (unngå støv)
+            // Velg den største inn-overføringen
             const primaryIn = tokenTransfersIn.reduce((max, op) => 
               BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersIn[0]);
             const inToken = primaryIn.identifier || 'UNKNOWN';
@@ -274,7 +302,11 @@ app.post('/fetch-transactions', async (req, res) => {
               fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
               txHash: tx.txHash
             });
-            continue; // Hopp over videre behandling for swaps
+
+            // Tøm overføringer for å unngå gjenbruk
+            tokenTransfersIn = [];
+            tokenTransfersOut = [];
+            continue;
           }
         }
 
@@ -301,7 +333,7 @@ app.post('/fetch-transactions', async (req, res) => {
           });
         }
 
-        // Behandle gjenværende ut-overføringer
+        // Behandle gjenværende ut-overføringer (kun hvis ikke swap)
         for (const [index, op] of tokenTransfersOut.entries()) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
