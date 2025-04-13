@@ -265,9 +265,8 @@ app.post('/fetch-transactions', async (req, res) => {
 
         // Håndter claimRewards og claimRewardsProxy
         if (['claimrewards', 'claimrewardsproxy'].includes(func)) {
-          console.log(`Processing ${func} for tx ${tx.txHash}: egld=${JSON.stringify(egldTransfersIn)}, tokens=${JSON.stringify(tokenTransfersIn.map(op => ({ identifier: op.identifier, value: op.value })))}`);
+          console.log(`Processing ${func} for tx ${tx.txHash}: tokens=${JSON.stringify(tokenTransfersIn.map(op => ({ identifier: op.identifier, value: op.value })))}`);
           
-          // Definer kjente belønningstokens
           const rewardTokens = [
             'XMEX-fda355', 'MEX-455c57', 'UTK-2f80e9', 'ZPAY-247875', 'QWT-46ac01',
             'RIDE-7d18e9', 'CRT-a28d59', 'CYBER-5d1f4a', 'AERO-458b36', 'ISET-83f339',
@@ -276,8 +275,8 @@ app.post('/fetch-transactions', async (req, res) => {
           const lpTokenPattern = /(FARM|FL-|EGLD.*FL|WEGLD.*FL|XMEXFARM|CYBEEGLD|CRTWEGLD)/i;
           let hasAddedReward = false;
 
-          // Prøv kjente belønningstokens først
-          for (const [index, op] of tokenTransfersIn.entries()) {
+          // Prøv belønningstokens først
+          for (const op of tokenTransfersIn) {
             const token = op.identifier || op.name || 'UNKNOWN';
             console.log(`Evaluating token ${token} for tx ${tx.txHash}`);
             if (rewardTokens.includes(token)) {
@@ -292,18 +291,21 @@ app.post('/fetch-transactions', async (req, res) => {
                 inCurrency: token,
                 outAmount: '0',
                 outCurrency: 'EGLD',
-                fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+                fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
                 txHash: tx.txHash
               });
               hasAddedReward = true;
               console.log(`Added reward token ${token} for tx ${tx.txHash}: ${formatted}`);
               break;
+            } else {
+              console.log(`Token ${token} not in rewardTokens`);
             }
           }
 
-          // Hvis ingen kjent belønningstoken, prøv ikke-LP-tokens
+          // Fallback: Kun ikke-LP-tokens
           if (!hasAddedReward) {
-            for (const [index, op] of tokenTransfersIn.entries()) {
+            console.log(`No reward token found in rewardTokens for tx ${tx.txHash}, trying non-LP tokens`);
+            for (const op of tokenTransfersIn) {
               const token = op.identifier || op.name || 'UNKNOWN';
               console.log(`Fallback: Evaluating token ${token} for tx ${tx.txHash}`);
               if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
@@ -321,7 +323,7 @@ app.post('/fetch-transactions', async (req, res) => {
                 inCurrency: token,
                 outAmount: '0',
                 outCurrency: 'EGLD',
-                fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+                fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
                 txHash: tx.txHash
               });
               hasAddedReward = true;
@@ -330,11 +332,11 @@ app.post('/fetch-transactions', async (req, res) => {
             }
           }
 
-          // Hvis ingen belønning lagt til, sjekk logs.events
+          // Fallback til logs.events
           if (!hasAddedReward) {
             console.log(`No reward token found in operations for tx ${tx.txHash}, checking logs.events`);
             const esdtEvents = logs.events?.filter(event => 
-              ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier) &&
+              ['ESDTTransfer', 'ESDTNFTTransfer'].includes(event.identifier) &&
               decodeBase64ToString(event.topics?.[3] || '') === walletAddress
             ) || [];
 
@@ -343,6 +345,10 @@ app.post('/fetch-transactions', async (req, res) => {
               console.log(`Logs: Evaluating token ${token} for tx ${tx.txHash}`);
               if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
                 console.warn(`⚠️ Skipping LP or unknown token ${token} in logs for ${func} tx ${tx.txHash}`);
+                continue;
+              }
+              if (!rewardTokens.includes(token)) {
+                console.log(`Logs: Token ${token} not in rewardTokens, skipping`);
                 continue;
               }
               const amountHex = event.topics?.[2] || '0';
@@ -377,7 +383,6 @@ app.post('/fetch-transactions', async (req, res) => {
             }
           }
 
-          // Hvis fortsatt ingen belønning, logg fallback
           if (!hasAddedReward && tokenTransfersIn.length > 0) {
             console.warn(`⚠️ No valid reward token found for tx ${tx.txHash}, tokens available: ${JSON.stringify(tokenTransfersIn.map(op => op.identifier))}`);
           }
