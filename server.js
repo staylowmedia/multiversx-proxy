@@ -79,6 +79,13 @@ async function getTokenDecimals(token, cache) {
   }
 }
 
+const rewardTokens = [
+  'XMEX-fda355', 'MEX-455c57', 'UTK-2f80e9', 'ZPAY-247875', 'QWT-46ac01',
+  'RIDE-7d18e9', 'CRT-a28d59', 'CYBER-5d1f4a', 'AERO-458b36', 'ISET-83f339',
+  'BHAT-c1fde3', 'SFIT-dcbf2a'
+];
+const lpTokenPattern = /(FARM|FL-|EGLD.*FL|WEGLD.*FL|XMEXFARM|CYBEEGLD|CRTWEGLD)/i;
+
 app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate, clientId } = req.body;
   if (!walletAddress || !fromDate || !toDate || !clientId) {
@@ -124,6 +131,10 @@ app.post('/fetch-transactions', async (req, res) => {
 
       for (const event of rewardEvents) {
         const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
+        if (!rewardTokens.includes(token) || lpTokenPattern.test(token)) {
+          console.log(`⚠️ Skipping LP or unrecognized token: ${token}`);
+          continue;
+        }
         const amountHex = decodeBase64ToHex(event.topics?.[2] || '0');
         const amount = decodeHexToBigInt(amountHex);
         if (!token || amount <= 0n) continue;
