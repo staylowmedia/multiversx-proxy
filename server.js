@@ -1,3 +1,5 @@
+// server.js – Komplett versjon med korrekt duplikatfjerning og detaljerte analyser
+
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -78,7 +80,6 @@ function deduplicateTransactions(transactions) {
 
 app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate, clientId } = req.body;
-
   if (!walletAddress || !fromDate || !toDate || !clientId) {
     return res.status(400).json({ error: 'Missing parameters' });
   }
@@ -116,26 +117,48 @@ app.post('/fetch-transactions', async (req, res) => {
       if (batch.length < pageSize) break;
     }
 
-    // Filter for tax-relevant functions
     const taxRelevantFunctions = [
       'claimrewards', 'claim', 'claimrewardsproxy',
       'swap_tokens_fixed_input', 'swap_tokens_fixed_output',
       'multipairswap', 'transfer', 'esdttransfer', 'multiesdtnfttransfer',
       'swap', 'send', 'receive', 'wrapegld', 'unwrapegld'
     ];
-    const taxRelevantTransactions = [];
 
+    const taxRelevantTransactions = [];
     for (const [index, tx] of allTransactions.entries()) {
       const func = (tx.function || '').toLowerCase();
       reportProgress(clientId, `🔍 Processing ${index + 1} of ${allTransactions.length}...`);
-      if (taxRelevantFunctions.includes(func)) {
+
+      const details = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}?withOperations=true&withLogs=true`);
+      const operations = details.data.operations || [];
+      const inOps = operations.filter(op => op.receiver === walletAddress && BigInt(op.value || 0) > 0);
+      const outOps = operations.filter(op => op.sender === walletAddress && BigInt(op.value || 0) > 0);
+
+      for (const op of inOps) {
+        const decimals = op.decimals || 18;
+        const amount = new BigNumber(op.value).div(new BigNumber(10).pow(decimals)).toString();
         taxRelevantTransactions.push({
           timestamp: tx.timestamp,
           function: func,
-          inAmount: tx.value && tx.receiver === walletAddress ? new BigNumber(tx.value).div(1e18).toString() : '0',
-          inCurrency: tx.value && tx.receiver === walletAddress ? 'EGLD' : '',
-          outAmount: tx.value && tx.sender === walletAddress ? new BigNumber(tx.value).div(1e18).toString() : '0',
-          outCurrency: tx.value && tx.sender === walletAddress ? 'EGLD' : '',
+          inAmount: amount,
+          inCurrency: op.identifier || 'EGLD',
+          outAmount: '0',
+          outCurrency: 'EGLD',
+          fee: new BigNumber(tx.fee || 0).div(1e18).toString(),
+          txHash: tx.txHash
+        });
+      }
+
+      for (const op of outOps) {
+        const decimals = op.decimals || 18;
+        const amount = new BigNumber(op.value).div(new BigNumber(10).pow(decimals)).toString();
+        taxRelevantTransactions.push({
+          timestamp: tx.timestamp,
+          function: func,
+          inAmount: '0',
+          inCurrency: 'EGLD',
+          outAmount: amount,
+          outCurrency: op.identifier || 'EGLD',
           fee: new BigNumber(tx.fee || 0).div(1e18).toString(),
           txHash: tx.txHash
         });
@@ -147,9 +170,8 @@ app.post('/fetch-transactions', async (req, res) => {
     cache.set(cacheKey, result);
     reportProgress(clientId, '✅ Done');
     return res.json(result);
-
   } catch (err) {
-    console.error('❌ Error fetching transactions:', err.message);
+    console.error('❌ Error:', err.message);
     reportProgress(clientId, '❌ Failed');
     return res.status(500).json({ error: 'Failed to fetch transactions' });
   }
