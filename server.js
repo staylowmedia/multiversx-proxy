@@ -45,27 +45,13 @@ function deduplicateTransactions(transactions) {
   const result = [];
 
   for (const tx of transactions) {
-    const key = `${tx.txHash}:${tx.function}`;
+    const key = `${tx.txHash}:${tx.function}:${tx.inAmount}:${tx.inCurrency}:${tx.outAmount}:${tx.outCurrency}`;
     if (!seen.has(key)) {
-      seen.set(key, { ...tx, inAmounts: [], outAmounts: [] });
+      seen.set(key, { ...tx, count: 1 });
       result.push(seen.get(key));
     } else {
-      const existing = seen.get(key);
-      if (tx.inAmount !== '0' && !existing.inAmounts.some(a => a.amount === tx.inAmount && a.currency === tx.inCurrency)) {
-        if (existing.inAmount === '0') {
-          existing.inAmount = tx.inAmount;
-          existing.inCurrency = tx.inCurrency;
-        }
-        existing.inAmounts.push({ amount: tx.inAmount, currency: tx.inCurrency });
-      }
-      if (tx.outAmount !== '0' && !existing.outAmounts.some(a => a.amount === tx.outAmount && a.currency === tx.outCurrency)) {
-        if (existing.outAmount === '0') {
-          existing.outAmount = tx.outAmount;
-          existing.outCurrency = tx.outCurrency;
-        }
-        existing.outAmounts.push({ amount: tx.outAmount, currency: tx.outCurrency });
-      }
-      console.log(`⚠️ Merged transaction: ${key}, in=${tx.inAmount} ${tx.inCurrency}, out=${tx.outAmount} ${tx.outCurrency}`);
+      seen.get(key).count += 1;
+      console.log(`⚠️ Detected duplicate transaction: ${key}, count=${seen.get(key).count}`);
     }
   }
 
@@ -233,11 +219,22 @@ app.post('/fetch-transactions', async (req, res) => {
           op.value && BigInt(op.value) > 0
         );
 
-        let tokenTransfersIn = operations.filter(op => 
-          (op.type === 'esdt' || op.type === 'MetaESDT' || op.type === 'nft' || op.type === 'nonFungibleESDT' || op.type === 'fungibleESDT') && 
-          op.receiver === walletAddress && 
-          op.value && BigInt(op.value) > 0
-        );
+        // Fjern duplikate operasjoner basert på identifier og verdi
+        const seenTokens = new Set();
+        let tokenTransfersIn = operations.filter(op => {
+          const key = `${op.identifier}:${op.value}`;
+          if (seenTokens.has(key)) {
+            console.log(`⚠️ Skipping duplicate operation for tx ${tx.txHash}: ${key}`);
+            return false;
+          }
+          if ((op.type === 'esdt' || op.type === 'MetaESDT' || op.type === 'nft' || op.type === 'nonFungibleESDT' || op.type === 'fungibleESDT') && 
+              op.receiver === walletAddress && 
+              op.value && BigInt(op.value) > 0) {
+            seenTokens.add(key);
+            return true;
+          }
+          return false;
+        });
 
         let tokenTransfersOut = operations.filter(op => 
           (op.type === 'esdt' || op.type === 'MetaESDT' || op.type === 'nft' || op.type === 'nonFungibleESDT' || op.type === 'fungibleESDT') && 
@@ -266,43 +263,45 @@ app.post('/fetch-transactions', async (req, res) => {
 
         // Håndter claimRewards og claimRewardsProxy
         if (['claimrewards', 'claimrewardsproxy'].includes(func)) {
-          console.log(`Processing ${func} for tx ${tx.txHash}: operations=${JSON.stringify(operations.map(op => ({ type: op.type, identifier: op.identifier, value: op.value, receiver: op.receiver })))}`);
+          console.log(`Processing ${func} for tx ${tx.txHash}: operations=${JSON.stringify(tokenTransfersIn.map(op => ({ type: op.type, identifier: op.identifier, value: op.value, receiver: op.receiver })))}`);
           
           const rewardTokens = [
             'XMEX-fda355', 'MEX-455c57', 'UTK-2f80e9', 'ZPAY-247875', 'QWT-46ac01',
             'RIDE-7d18e9', 'CRT-a28d59', 'CYBER-5d1f4a', 'AERO-458b36', 'ISET-83f339',
-            'BHAT-c1fde3', 'SFIT-dcbf2a'
+            'BHAT-c1fde3', 'SFIT-dcbf2a', 'RARE-99e8b0'
           ];
           const lpTokenPattern = /(FARM|FL-|EGLD.*FL|WEGLD.*FL|XMEXFARM|CYBEEGLD|CRTWEGLD)/i;
           let hasAddedReward = false;
 
           // Prøv belønningstokens først
-          for (const op of tokenTransfersIn) {
-            const token = op.identifier || op.name || 'UNKNOWN';
-            console.log(`Evaluating token ${token} (value=${op.value}, type=${op.type}, receiver=${op.receiver}) for tx ${tx.txHash}`);
-            if (rewardTokens.includes(token)) {
-              const amount = BigInt(op.value);
-              const decimals = await getTokenDecimals(token, tokenDecimalsCache);
-              const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+          if (tokenTransfersIn.length > 0) {
+            for (const op of tokenTransfersIn) {
+              const token = op.identifier || op.name || 'UNKNOWN';
+              console.log(`Evaluating token ${token} (value=${op.value}, type=${op.type}, receiver=${op.receiver}) for tx ${tx.txHash}`);
+              if (rewardTokens.includes(token)) {
+                const amount = BigInt(op.value);
+                const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+                const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
-              taxRelevantTransactions.push({
-                timestamp: tx.timestamp,
-                function: func,
-                inAmount: formatted,
-                inCurrency: token,
-                outAmount: '0',
-                outCurrency: 'EGLD',
-                fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-                txHash: tx.txHash
-              });
-              hasAddedReward = true;
-              console.log(`Added reward token ${token} for tx ${tx.txHash}: ${formatted}`);
-              break;
+                taxRelevantTransactions.push({
+                  timestamp: tx.timestamp,
+                  function: func,
+                  inAmount: formatted,
+                  inCurrency: token,
+                  outAmount: '0',
+                  outCurrency: 'EGLD',
+                  fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+                  txHash: tx.txHash
+                });
+                hasAddedReward = true;
+                console.log(`Added reward token ${token} for tx ${tx.txHash}: ${formatted}`);
+                break;
+              }
             }
           }
 
           // Prøv ikke-LP-tokens
-          if (!hasAddedReward) {
+          if (!hasAddedReward && tokenTransfersIn.length > 0) {
             console.log(`No reward token found in rewardTokens for tx ${tx.txHash}, trying non-LP tokens`);
             for (const op of tokenTransfersIn) {
               const token = op.identifier || op.name || 'UNKNOWN';
@@ -391,7 +390,6 @@ app.post('/fetch-transactions', async (req, res) => {
               fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
               txHash: tx.txHash
             });
-            hasAddedReward = true;
           }
         }
 
