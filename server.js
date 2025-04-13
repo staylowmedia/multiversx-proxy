@@ -219,6 +219,7 @@ app.post('/fetch-transactions', async (req, res) => {
              'b27f6ee98aa7b815d8ff5381e0b14257d9b057ef5797e4ebd10654e1ff11be96',
              'd51b0d4f04ca502a9881d3c686ff3aa339a3c61749878e67244d79047fdc84c1',
              'b13e89d95cfd7c4d3db8920a3fd9daf299d98dcdfbcc51ed2194a5d136bb6b1f',
+             'd2152f56d1485bddf923a8e836fa6842e10dc9cd6613da2e0ab617fd2e2ba466',
              '3978c429a0a9e9004a819a5d70c297bccfd40629e566c889a3a15d1c0115c0fb',
              '4bd2be4985c6cbf6fdadeb68f2593e9d7fb94b2952c4800f4e1a5030945cbb7f',
              '20b57c15bd2a0de05f476b1169f42283e6c345c6e3cae90a0a10bd01f9a63496'].includes(tx.txHash)) {
@@ -233,13 +234,12 @@ app.post('/fetch-transactions', async (req, res) => {
         );
 
         let tokenTransfersIn = operations.filter(op => 
-          (op.type === 'esdt' || op.type === 'MetaESDT') && 
-          op.receiver === walletAddress && 
+          (op.type === 'esdt' || op.type === 'MetaESDT' || op.type === 'nft' || op.type === 'nonFungibleESDT') && 
           op.value && BigInt(op.value) > 0
         );
 
         let tokenTransfersOut = operations.filter(op => 
-          (op.type === 'esdt' || op.type === 'MetaESDT') && 
+          (op.type === 'esdt' || op.type === 'MetaESDT' || op.type === 'nft' || op.type === 'nonFungibleESDT') && 
           op.sender === walletAddress && 
           op.value && BigInt(op.value) > 0
         );
@@ -277,43 +277,13 @@ app.post('/fetch-transactions', async (req, res) => {
 
           // Prøv belønningstokens først
           if (tokenTransfersIn.length > 0) {
-            // Sorter etter verdi for å prioritere belønningstokens (ofte høyere verdi)
+            // Sorter etter verdi for å prioritere belønningstokens
             tokenTransfersIn.sort((a, b) => BigInt(b.value) - BigInt(a.value));
             for (const op of tokenTransfersIn) {
               const token = op.identifier || op.name || 'UNKNOWN';
-              console.log(`Evaluating token ${token} (value=${op.value}) for tx ${tx.txHash}`);
-              if (rewardTokens.includes(token)) {
-                const amount = BigInt(op.value);
-                const decimals = await getTokenDecimals(token, tokenDecimalsCache);
-                const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
-
-                taxRelevantTransactions.push({
-                  timestamp: tx.timestamp,
-                  function: func,
-                  inAmount: formatted,
-                  inCurrency: token,
-                  outAmount: '0',
-                  outCurrency: 'EGLD',
-                  fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-                  txHash: tx.txHash
-                });
-                hasAddedReward = true;
-                console.log(`Added reward token ${token} for tx ${tx.txHash}: ${formatted}`);
-                break;
-              } else {
-                console.log(`Token ${token} not in rewardTokens`);
-              }
-            }
-          }
-
-          // Fallback: Kun ikke-LP-tokens
-          if (!hasAddedReward && tokenTransfersIn.length > 0) {
-            console.log(`No reward token found in rewardTokens for tx ${tx.txHash}, trying non-LP tokens`);
-            for (const op of tokenTransfersIn) {
-              const token = op.identifier || op.name || 'UNKNOWN';
-              console.log(`Fallback: Evaluating token ${token} (value=${op.value}) for tx ${tx.txHash}`);
-              if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
-                console.warn(`⚠️ Skipping LP or unknown token ${token} for ${func} tx ${tx.txHash}`);
+              console.log(`Evaluating token ${token} (value=${op.value}, type=${op.type}) for tx ${tx.txHash}`);
+              if (lpTokenPattern.test(token)) {
+                console.warn(`⚠️ Skipping LP token ${token} for ${func} tx ${tx.txHash}`);
                 continue;
               }
               const amount = BigInt(op.value);
@@ -331,7 +301,7 @@ app.post('/fetch-transactions', async (req, res) => {
                 txHash: tx.txHash
               });
               hasAddedReward = true;
-              console.log(`Added fallback reward token ${token} for tx ${tx.txHash}: ${formatted}`);
+              console.log(`Added reward token ${token} for tx ${tx.txHash}: ${formatted}`);
               break;
             }
           }
@@ -340,11 +310,10 @@ app.post('/fetch-transactions', async (req, res) => {
           if (!hasAddedReward) {
             console.log(`No reward token found in operations for tx ${tx.txHash}, checking logs.events`);
             const esdtEvents = logs.events?.filter(event => 
-              ['ESDTTransfer', 'ESDTNFTTransfer'].includes(event.identifier) &&
-              decodeBase64ToString(event.topics?.[3] || '') === walletAddress
+              ['ESDTTransfer', 'ESDTNFTTransfer'].includes(event.identifier)
             ) || [];
 
-            // Sorter events etter verdi hvis mulig
+            // Sorter events etter verdi
             esdtEvents.sort((a, b) => {
               const aValue = decodeHexToBigInt(decodeBase64ToHex(a.topics?.[2] || '0'));
               const bValue = decodeHexToBigInt(decodeBase64ToHex(b.topics?.[2] || '0'));
@@ -391,7 +360,7 @@ app.post('/fetch-transactions', async (req, res) => {
           }
 
           if (!hasAddedReward) {
-            console.warn(`⚠️ No valid reward token found for tx ${tx.txHash}, tokens available: ${JSON.stringify(tokenTransfersIn.map(op => op.identifier))}`);
+            console.warn(`⚠️ No valid reward token found for tx ${tx.txHash}, operations=${JSON.stringify(operations.map(op => op.identifier))}`);
           }
           // Fortsett til neste behandling
         }
@@ -408,7 +377,7 @@ app.post('/fetch-transactions', async (req, res) => {
             const amount = BigInt(inOp.value);
             const decimals = await getTokenDecimals(inOp.identifier, tokenDecimalsCache);
             inAmount = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
-            inCurrency = op.identifier;
+            inCurrency = inOp.identifier;
           }
 
           taxRelevantTransactions.push({
