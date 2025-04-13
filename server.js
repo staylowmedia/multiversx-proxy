@@ -15,7 +15,7 @@ app.use(express.json());
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 app.get('/progress/:id', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Content-Type', 'text-event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
@@ -217,7 +217,8 @@ app.post('/fetch-transactions', async (req, res) => {
              '63de0408dd97ff4f1558cbed7578f108668b52f47deb24339ef4104649170bfb',
              '41300520b7ae6fdfbc9fb8e1e551fa0a86c35c3f5d548a14e9797104e93bf0b6',
              'b27f6ee98aa7b815d8ff5381e0b14257d9b057ef5797e4ebd10654e1ff11be96',
-             'd51b0d4f04ca502a9881d3c686ff3aa339a3c61749878e67244d79047fdc84c1'].includes(tx.txHash)) {
+             'd51b0d4f04ca502a9881d3c686ff3aa339a3c61749878e67244d79047fdc84c1',
+             'b13e89d95cfd7c4d3db8920a3fd9daf299d98dcdfbcc51ed2194a5d136bb6b1f'].includes(tx.txHash)) {
           console.log(`Full response for tx ${tx.txHash}:`, JSON.stringify(detailed.data, null, 2));
         }
 
@@ -330,6 +331,54 @@ app.post('/fetch-transactions', async (req, res) => {
             tokenTransfersOut = [];
             continue;
           }
+        }
+
+        // Håndter claimRewardsProxy
+        if (func === 'claimrewardsproxy') {
+          console.log(`Processing claimRewardsProxy for tx ${tx.txHash}: tokens=${JSON.stringify(tokenTransfersIn)}`);
+          // Prioriter XMEX-fda355 som belønning
+          const rewardOp = tokenTransfersIn.find(op => op.identifier === 'XMEX-fda355');
+          if (rewardOp) {
+            const token = rewardOp.identifier;
+            const amount = BigInt(rewardOp.value);
+            const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+            const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: func,
+              inAmount: formatted,
+              inCurrency: token,
+              outAmount: '0',
+              outCurrency: 'EGLD',
+              fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+              txHash: tx.txHash
+            });
+            continue; // Hopp over andre tokens
+          }
+          // Fallback til andre tokens hvis XMEX ikke finnes
+          for (const [index, op] of tokenTransfersIn.entries()) {
+            const token = op.identifier || op.name || 'UNKNOWN';
+            if (token === 'UNKNOWN' || token.includes('FARM')) {
+              console.warn(`⚠️ Skipping LP or unknown token ${token} for claimRewardsProxy tx ${tx.txHash}`);
+              continue;
+            }
+            const amount = BigInt(op.value);
+            const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+            const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: func,
+              inAmount: formatted,
+              inCurrency: token,
+              outAmount: '0',
+              outCurrency: 'EGLD',
+              fee: index === 0 ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+              txHash: tx.txHash
+            });
+          }
+          continue;
         }
 
         // Behandle gjenværende ESDT inn-overføringer
