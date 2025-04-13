@@ -15,7 +15,7 @@ app.use(express.json());
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 app.get('/progress/:id', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Content-Type', 'text-event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
@@ -265,7 +265,7 @@ app.post('/fetch-transactions', async (req, res) => {
 
         // Håndter claimRewards og claimRewardsProxy
         if (['claimrewards', 'claimrewardsproxy'].includes(func)) {
-          console.log(`Processing ${func} for tx ${tx.txHash}: egld=${JSON.stringify(egldTransfersIn)}, tokens=${JSON.stringify(tokenTransfersIn)}`);
+          console.log(`Processing ${func} for tx ${tx.txHash}: egld=${JSON.stringify(egldTransfersIn)}, tokens=${JSON.stringify(tokenTransfersIn.map(op => ({ identifier: op.identifier, value: op.value })))}`);
           
           // Definer kjente belønningstokens
           const rewardTokens = [
@@ -273,15 +273,15 @@ app.post('/fetch-transactions', async (req, res) => {
             'RIDE-7d18e9', 'CRT-a28d59', 'CYBER-5d1f4a', 'AERO-458b36', 'ISET-83f339',
             'BHAT-c1fde3', 'SFIT-dcbf2a'
           ];
-          const lpTokenPattern = /(FARM|FL-|EGLD.*FL-|WEGLD.*FL)/i; // Matcher FARM, FL-, EGLD*FL-, WEGLD*FL-
+          const lpTokenPattern = /(FARM|FL-|EGLD.*FL|WEGLD.*FL|XMEXFARM|CYBEEGLD|CRTWEGLD)/i;
           let hasAddedReward = false;
 
           // Prøv kjente belønningstokens først
-          for (const rewardToken of rewardTokens) {
-            const rewardOp = tokenTransfersIn.find(op => op.identifier === rewardToken);
-            if (rewardOp) {
-              const token = rewardOp.identifier;
-              const amount = BigInt(rewardOp.value);
+          for (const [index, op] of tokenTransfersIn.entries()) {
+            const token = op.identifier || op.name || 'UNKNOWN';
+            console.log(`Evaluating token ${token} for tx ${tx.txHash}`);
+            if (rewardTokens.includes(token)) {
+              const amount = BigInt(op.value);
               const decimals = await getTokenDecimals(token, tokenDecimalsCache);
               const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
@@ -292,12 +292,12 @@ app.post('/fetch-transactions', async (req, res) => {
                 inCurrency: token,
                 outAmount: '0',
                 outCurrency: 'EGLD',
-                fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+                fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
                 txHash: tx.txHash
               });
               hasAddedReward = true;
-              console.log(`Added reward token ${token} for tx ${tx.txHash}`);
-              break; // Kun én belønning per transaksjon
+              console.log(`Added reward token ${token} for tx ${tx.txHash}: ${formatted}`);
+              break;
             }
           }
 
@@ -305,6 +305,7 @@ app.post('/fetch-transactions', async (req, res) => {
           if (!hasAddedReward) {
             for (const [index, op] of tokenTransfersIn.entries()) {
               const token = op.identifier || op.name || 'UNKNOWN';
+              console.log(`Fallback: Evaluating token ${token} for tx ${tx.txHash}`);
               if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
                 console.warn(`⚠️ Skipping LP or unknown token ${token} for ${func} tx ${tx.txHash}`);
                 continue;
@@ -324,12 +325,14 @@ app.post('/fetch-transactions', async (req, res) => {
                 txHash: tx.txHash
               });
               hasAddedReward = true;
-              console.log(`Added fallback reward token ${token} for tx ${tx.txHash}`);
+              console.log(`Added fallback reward token ${token} for tx ${tx.txHash}: ${formatted}`);
+              break;
             }
           }
 
-          // Hvis ingen belønning lagt til ennå, sjekk logs.events
+          // Hvis ingen belønning lagt til, sjekk logs.events
           if (!hasAddedReward) {
+            console.log(`No reward token found in operations for tx ${tx.txHash}, checking logs.events`);
             const esdtEvents = logs.events?.filter(event => 
               ['ESDTTransfer', 'ESDTNFTTransfer', 'transfer', 'ESDTLocalTransfer'].includes(event.identifier) &&
               decodeBase64ToString(event.topics?.[3] || '') === walletAddress
@@ -337,6 +340,7 @@ app.post('/fetch-transactions', async (req, res) => {
 
             for (const event of esdtEvents) {
               const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
+              console.log(`Logs: Evaluating token ${token} for tx ${tx.txHash}`);
               if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
                 console.warn(`⚠️ Skipping LP or unknown token ${token} in logs for ${func} tx ${tx.txHash}`);
                 continue;
@@ -368,9 +372,14 @@ app.post('/fetch-transactions', async (req, res) => {
                 txHash: tx.txHash
               });
               hasAddedReward = true;
-              console.log(`Added reward token ${token} from logs for tx ${tx.txHash}`);
+              console.log(`Added reward token ${token} from logs for tx ${tx.txHash}: ${formatted}`);
               break;
             }
+          }
+
+          // Hvis fortsatt ingen belønning, logg fallback
+          if (!hasAddedReward && tokenTransfersIn.length > 0) {
+            console.warn(`⚠️ No valid reward token found for tx ${tx.txHash}, tokens available: ${JSON.stringify(tokenTransfersIn.map(op => op.identifier))}`);
           }
           // Fortsett til neste behandling
         }
