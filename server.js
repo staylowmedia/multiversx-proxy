@@ -51,7 +51,6 @@ function deduplicateTransactions(transactions) {
       result.push(seen.get(key));
     } else {
       const existing = seen.get(key);
-      // Kombiner inn- og ut-verdier
       if (tx.inAmount !== '0' && !existing.inAmounts.some(a => a.amount === tx.inAmount && a.currency === tx.inCurrency)) {
         if (existing.inAmount === '0') {
           existing.inAmount = tx.inAmount;
@@ -217,11 +216,18 @@ app.post('/fetch-transactions', async (req, res) => {
              '399dda89a91f7612e4a438c774e73dfbabac749e4c5eb84f89a2f959622ee1c3',
              '63de0408dd97ff4f1558cbed7578f108668b52f47deb24339ef4104649170bfb',
              '41300520b7ae6fdfbc9fb8e1e551fa0a86c35c3f5d548a14e9797104e93bf0b6',
-             'b27f6ee98aa7b815d8ff5381e0b14257d9b057ef5797e4ebd10654e1ff11be96'].includes(tx.txHash)) {
+             'b27f6ee98aa7b815d8ff5381e0b14257d9b057ef5797e4ebd10654e1ff11be96',
+             'd51b0d4f04ca502a9881d3c686ff3aa339a3c61749878e67244d79047fdc84c1'].includes(tx.txHash)) {
           console.log(`Full response for tx ${tx.txHash}:`, JSON.stringify(detailed.data, null, 2));
         }
 
         // Samle inn- og ut-overføringer
+        let egldTransfersIn = operations.filter(op => 
+          op.type === 'egld' && 
+          op.receiver === walletAddress && 
+          op.value && BigInt(op.value) > 0
+        );
+
         let tokenTransfersIn = operations.filter(op => 
           op.type === 'esdt' && 
           op.receiver === walletAddress && 
@@ -233,6 +239,25 @@ app.post('/fetch-transactions', async (req, res) => {
           op.sender === walletAddress && 
           op.value && BigInt(op.value) > 0
         );
+
+        // Håndter EGLD inn fra operations
+        for (const [index, op] of egldTransfersIn.entries()) {
+          console.log(`Found EGLD operation for tx ${tx.txHash}: ${op.value} wei`);
+          const amount = BigInt(op.value);
+          const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed();
+
+          taxRelevantTransactions.push({
+            timestamp: tx.timestamp,
+            function: tx.function || 'transfer',
+            inAmount: formatted,
+            inCurrency: 'EGLD',
+            outAmount: '0',
+            outCurrency: 'EGLD',
+            fee: index === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+            txHash: tx.txHash
+          });
+          hasAddedEGLD = true;
+        }
 
         // Spesifikk håndtering for wrapEgld
         if (func === 'wrapegld' && tx.sender === walletAddress && tx.value && BigInt(tx.value) > 0) {
@@ -266,7 +291,6 @@ app.post('/fetch-transactions', async (req, res) => {
         if (['swap_tokens_fixed_input', 'swap_tokens_fixed_output', 'multipairswap'].includes(func)) {
           console.log(`Processing swap for tx ${tx.txHash}: in=${JSON.stringify(tokenTransfersIn)}, out=${JSON.stringify(tokenTransfersOut)}`);
           if (tokenTransfersIn.length > 0) {
-            // Velg den største inn-overføringen
             const primaryIn = tokenTransfersIn.reduce((max, op) => 
               BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersIn[0]);
             const inToken = primaryIn.identifier || 'UNKNOWN';
@@ -280,7 +304,6 @@ app.post('/fetch-transactions', async (req, res) => {
 
             let outAmount = '0', outCurrency = 'EGLD';
             if (tokenTransfersOut.length > 0) {
-              // Velg den største ut-overføringen
               const primaryOut = tokenTransfersOut.reduce((max, op) => 
                 BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersOut[0]);
               const outToken = primaryOut.identifier || 'UNKNOWN';
@@ -303,14 +326,13 @@ app.post('/fetch-transactions', async (req, res) => {
               txHash: tx.txHash
             });
 
-            // Tøm overføringer for å unngå gjenbruk
             tokenTransfersIn = [];
             tokenTransfersOut = [];
             continue;
           }
         }
 
-        // Behandle gjenværende inn-overføringer
+        // Behandle gjenværende ESDT inn-overføringer
         for (const [index, op] of tokenTransfersIn.entries()) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
@@ -333,7 +355,7 @@ app.post('/fetch-transactions', async (req, res) => {
           });
         }
 
-        // Behandle gjenværende ut-overføringer (kun hvis ikke swap)
+        // Behandle gjenværende ESDT ut-overføringer
         for (const [index, op] of tokenTransfersOut.entries()) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
@@ -444,7 +466,7 @@ app.post('/fetch-transactions', async (req, res) => {
           });
         }
 
-        if (!hasAddedEGLD && tokenTransfersIn.length === 0 && tokenTransfersOut.length === 0 && esdtEvents.length === 0 && esdtResults.length === 0) {
+        if (!hasAddedEGLD && egldTransfersIn.length === 0 && tokenTransfersIn.length === 0 && tokenTransfersOut.length === 0 && esdtEvents.length === 0 && esdtResults.length === 0) {
           console.warn(`⚠️ No transfers found for tx ${tx.txHash}, using fallback`);
           taxRelevantTransactions.push({
             timestamp: tx.timestamp,
