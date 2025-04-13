@@ -258,7 +258,7 @@ app.post('/fetch-transactions', async (req, res) => {
           const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed();
 
           taxRelevantTransactions.push({
-            timestamp: txDDO timestamp,
+            timestamp: tx.timestamp,
             function: tx.function || 'transfer',
             inAmount: formatted,
             inCurrency: 'EGLD',
