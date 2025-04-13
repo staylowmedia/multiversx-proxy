@@ -1,5 +1,3 @@
-// server.js – Komplett versjon med korrekt duplikatfjerning og detaljerte analyser
-
 const express = require('express');
 const axios = require('axios');
 const NodeCache = require('node-cache');
@@ -36,6 +34,19 @@ function reportProgress(clientId, message) {
   if (sender) sender(message);
 }
 
+function decodeBase64ToString(base64) {
+  try { return Buffer.from(base64, 'base64').toString(); } catch { return ''; }
+}
+function decodeBase64ToHex(base64) {
+  try { return Buffer.from(base64, 'base64').toString('hex'); } catch { return '0'; }
+}
+function decodeHexToString(hex) {
+  try { return Buffer.from(hex, 'hex').toString(); } catch { return ''; }
+}
+function decodeHexToBigInt(hex) {
+  try { return BigInt(`0x${hex}`); } catch { return BigInt(0); }
+}
+
 function deduplicateTransactions(transactions) {
   const seen = new Map();
   const result = [];
@@ -44,38 +55,28 @@ function deduplicateTransactions(transactions) {
     const normalizedFunc = (tx.function || '').toLowerCase();
     const key = `${tx.txHash}:${normalizedFunc}`;
     if (!seen.has(key)) {
-      seen.set(key, { ...tx, function: normalizedFunc, inAmounts: [], outAmounts: [] });
+      seen.set(key, { ...tx, function: normalizedFunc });
       result.push(seen.get(key));
     } else {
-      const existing = seen.get(key);
-      if (tx.inAmount !== '0' && !existing.inAmounts.some(a => a.amount === tx.inAmount && a.currency === tx.inCurrency)) {
-        if (existing.inAmount === '0') {
-          existing.inAmount = tx.inAmount;
-          existing.inCurrency = tx.inCurrency;
-        }
-        existing.inAmounts.push({ amount: tx.inAmount, currency: tx.inCurrency });
-      }
-      if (tx.outAmount !== '0' && !existing.outAmounts.some(a => a.amount === tx.outAmount && a.currency === tx.outCurrency)) {
-        if (existing.outAmount === '0') {
-          existing.outAmount = tx.outAmount;
-          existing.outCurrency = tx.outCurrency;
-        }
-        existing.outAmounts.push({ amount: tx.outAmount, currency: tx.outCurrency });
-      }
-      console.log(`⚠️ Merged transaction: ${key}, in=${tx.inAmount} ${tx.inCurrency}, out=${tx.outAmount} ${tx.outCurrency}`);
+      console.log(`⚠️ Duplicate skipped: ${key}`);
     }
   }
 
-  return result.map(tx => ({
-    timestamp: tx.timestamp,
-    function: tx.function,
-    inAmount: tx.inAmount,
-    inCurrency: tx.inCurrency,
-    outAmount: tx.outAmount,
-    outCurrency: tx.outCurrency,
-    fee: tx.fee,
-    txHash: tx.txHash
-  }));
+  return result;
+}
+
+async function getTokenDecimals(token, cache) {
+  if (!token || token === 'EGLD') return 18;
+  if (cache[token]) return cache[token];
+  try {
+    const res = await axios.get(`https://api.multiversx.com/tokens/${token}`);
+    const decimals = res.data.decimals || 18;
+    cache[token] = decimals;
+    return decimals;
+  } catch (e) {
+    console.warn(`⚠️ Could not fetch decimals for ${token}`);
+    return 18;
+  }
 }
 
 app.post('/fetch-transactions', async (req, res) => {
@@ -95,70 +96,48 @@ app.post('/fetch-transactions', async (req, res) => {
     return res.json(cache.get(cacheKey));
   }
 
-  const fromTimestamp = Math.floor(new Date(fromDate).getTime() / 1000);
-  const toTimestamp = Math.floor(new Date(toDate).getTime() / 1000);
-  let allTransactions = [];
+  const fromTs = Math.floor(new Date(fromDate).getTime() / 1000);
+  const toTs = Math.floor(new Date(toDate).getTime() / 1000);
+  let allTransactions = [], tokenDecimalsCache = {};
+  const taxRelevantTransactions = [];
 
   try {
     reportProgress(clientId, '🔍 Fetching transactions...');
-    const pageSize = 1000;
-    for (let from = 0; from < 10000; from += pageSize) {
-      const params = {
-        after: fromTimestamp,
-        before: toTimestamp,
-        size: pageSize,
-        order: 'asc',
-        from
-      };
-      const response = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, { params });
-      const batch = response.data;
-      allTransactions.push(...batch);
-      reportProgress(clientId, `📦 Fetched ${allTransactions.length} transactions...`);
-      if (batch.length < pageSize) break;
+    for (let from = 0; from < 10000; from += 1000) {
+      const res = await axios.get(`https://api.multiversx.com/accounts/${walletAddress}/transactions`, {
+        params: { after: fromTs, before: toTs, size: 1000, order: 'asc', from }
+      });
+      allTransactions.push(...res.data);
+      reportProgress(clientId, `📦 ${allTransactions.length} transactions...`);
+      if (res.data.length < 1000) break;
     }
 
-    const taxRelevantFunctions = [
-      'claimrewards', 'claim', 'claimrewardsproxy',
-      'swap_tokens_fixed_input', 'swap_tokens_fixed_output',
-      'multipairswap', 'transfer', 'esdttransfer', 'multiesdtnfttransfer',
-      'swap', 'send', 'receive', 'wrapegld', 'unwrapegld'
-    ];
-
-    const taxRelevantTransactions = [];
-    for (const [index, tx] of allTransactions.entries()) {
+    for (const [i, tx] of allTransactions.entries()) {
       const func = (tx.function || '').toLowerCase();
-      reportProgress(clientId, `🔍 Processing ${index + 1} of ${allTransactions.length}...`);
+      reportProgress(clientId, `🔍 Analyzing ${i + 1}/${allTransactions.length}`);
 
-      const details = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}?withOperations=true&withLogs=true`);
-      const operations = details.data.operations || [];
-      const inOps = operations.filter(op => op.receiver === walletAddress && BigInt(op.value || 0) > 0);
-      const outOps = operations.filter(op => op.sender === walletAddress && BigInt(op.value || 0) > 0);
+      if (!['claimrewards', 'claimrewardsproxy'].includes(func)) continue;
 
-      for (const op of inOps) {
-        const decimals = op.decimals || 18;
-        const amount = new BigNumber(op.value).div(new BigNumber(10).pow(decimals)).toString();
+      const details = await axios.get(`https://api.multiversx.com/transactions/${tx.txHash}?withLogs=true&withOperations=true`);
+      const logs = details.data.logs?.events || [];
+      const rewardEvents = logs.filter(e => ['ESDTTransfer', 'ESDTNFTTransfer'].includes(e.identifier));
+
+      for (const event of rewardEvents) {
+        const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
+        const amountHex = decodeBase64ToHex(event.topics?.[2] || '0');
+        const amount = decodeHexToBigInt(amountHex);
+        if (!token || amount <= 0n) continue;
+
+        const decimals = await getTokenDecimals(token, tokenDecimalsCache);
+        const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
         taxRelevantTransactions.push({
           timestamp: tx.timestamp,
           function: func,
-          inAmount: amount,
-          inCurrency: op.identifier || 'EGLD',
+          inAmount: formatted,
+          inCurrency: token,
           outAmount: '0',
           outCurrency: 'EGLD',
-          fee: new BigNumber(tx.fee || 0).div(1e18).toString(),
-          txHash: tx.txHash
-        });
-      }
-
-      for (const op of outOps) {
-        const decimals = op.decimals || 18;
-        const amount = new BigNumber(op.value).div(new BigNumber(10).pow(decimals)).toString();
-        taxRelevantTransactions.push({
-          timestamp: tx.timestamp,
-          function: func,
-          inAmount: '0',
-          inCurrency: 'EGLD',
-          outAmount: amount,
-          outCurrency: op.identifier || 'EGLD',
           fee: new BigNumber(tx.fee || 0).div(1e18).toString(),
           txHash: tx.txHash
         });
@@ -169,11 +148,11 @@ app.post('/fetch-transactions', async (req, res) => {
     const result = { allTransactions, taxRelevantTransactions: deduped };
     cache.set(cacheKey, result);
     reportProgress(clientId, '✅ Done');
-    return res.json(result);
+    res.json(result);
   } catch (err) {
     console.error('❌ Error:', err.message);
     reportProgress(clientId, '❌ Failed');
-    return res.status(500).json({ error: 'Failed to fetch transactions' });
+    res.status(500).json({ error: 'Could not process transactions' });
   }
 });
 
