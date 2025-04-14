@@ -16,7 +16,10 @@ const CONFIG = {
   PAGE_SIZE: 1000,
   MAX_RETRIES: 5,
   BASE_DELAY_MS: 1000,
-  CORS_ORIGINS: ['https://your-frontend-url.onrender.com', 'http://localhost:3000'], // Erstatt med din frontend-URL
+  CORS_ORIGINS: [
+    'https://www.multiversxdomain.com', // Din frontend-URL
+    'http://localhost:3000' // For lokal testing
+  ],
   REWARD_TOKENS: [
     'XMEX-fda355', 'MEX-455c57', 'UTK-2f80e9', 'ZPAY-247875', 'QWT-46ac01',
     'RIDE-7d18e9', 'CRT-a28d59', 'CYBER-5d1f4a', 'AERO-458b36', 'ISET-83f339',
@@ -32,11 +35,21 @@ const CONFIG = {
     'WEGLD-bd4d79': 18,
     'MEX-455c57': 18,
     'XMEX-fda355': 18
-    // Legg til flere kjente tokens her
   }
 };
 
-app.use(cors({ origin: CONFIG.CORS_ORIGINS }));
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || CONFIG.CORS_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`⚠️ CORS blocked for origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type']
+}));
 app.use(express.json());
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
