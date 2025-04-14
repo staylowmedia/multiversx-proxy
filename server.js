@@ -7,7 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 3600 }); // Cache for resultater
-const tokenDecimalsCache = new NodeCache({ stdTTL: 86400 }); // Cache for token-decimals (1 dag)
+const tokenDecimalsCache = new NodeCache({ stdTTL: 86400 }); // Cache for token-decimals
 const clientProgress = new Map();
 
 // Konfigurasjon
@@ -108,21 +108,59 @@ const decodeBase64ToString = (base64) => {
 const decodeBase64ToHex = (base64) => {
   try { return Buffer.from(base64, 'base64').toString('hex'); } catch { return '0'; }
 };
+const decodeHexToString = (hex) => {
+  try { return Buffer.from(hex, 'hex').toString(); } catch { return ''; }
+};
 const decodeHexToBigInt = (hex) => {
   try { return BigInt(`0x${hex}`); } catch { return BigInt(0); }
 };
 
 function deduplicateTransactions(transactions) {
   const seen = new Map();
-  return transactions.filter(tx => {
-    const key = `${tx.txHash}:${tx.function}:${tx.inAmount}:${tx.inCurrency}:${tx.outAmount}:${tx.outCurrency}:${tx.fee}`;
-    if (seen.has(key)) {
-      console.log(`⚠️ Duplicate transaction: ${key}`);
-      return false;
+  const result = [];
+
+  for (const tx of transactions) {
+    const key = `${tx.txHash}:${tx.function}`;
+    if (!seen.has(key)) {
+      seen.set(key, {
+        ...tx,
+        inAmounts: [],
+        outAmounts: []
+      });
+      result.push(seen.get(key));
+    } else {
+      const existing = seen.get(key);
+      if (tx.inAmount !== '0' && !existing.inAmounts.some(a => a.amount === tx.inAmount && a.currency === tx.inCurrency)) {
+        if (existing.inAmount === '0' || BigNumber(tx.inAmount).gt(existing.inAmount)) {
+          existing.inAmount = tx.inAmount;
+          existing.inCurrency = tx.inCurrency;
+        }
+        existing.inAmounts.push({ amount: tx.inAmount, currency: tx.inCurrency });
+      }
+      if (tx.outAmount !== '0' && !existing.outAmounts.some(a => a.amount === tx.outAmount && a.currency === tx.outCurrency)) {
+        if (existing.outAmount === '0' || BigNumber(tx.outAmount).gt(existing.outAmount)) {
+          existing.outAmount = tx.outAmount;
+          existing.outCurrency = tx.outCurrency;
+        }
+        existing.outAmounts.push({ amount: tx.outAmount, currency: tx.outCurrency });
+      }
+      if (tx.fee !== '0' && existing.fee === '0') {
+        existing.fee = tx.fee;
+      }
+      console.log(`⚠️ Merged transaction: ${key}, in=${tx.inAmount} ${tx.inCurrency}, out=${tx.outAmount} ${tx.outCurrency}`);
     }
-    seen.set(key, true);
-    return true;
-  });
+  }
+
+  return result.map(tx => ({
+    timestamp: tx.timestamp,
+    function: tx.function,
+    inAmount: tx.inAmount,
+    inCurrency: tx.inCurrency,
+    outAmount: tx.outAmount,
+    outCurrency: tx.outCurrency,
+    fee: tx.fee,
+    txHash: tx.txHash
+  }));
 }
 
 async function fetchWithRetry(url, params, retries = CONFIG.MAX_RETRIES, delayMs = CONFIG.BASE_DELAY_MS) {
@@ -239,7 +277,10 @@ app.post('/fetch-transactions', async (req, res) => {
                            !func ||
                            tx.action?.category === 'mex' ||
                            tx.data?.startsWith('RVNEVFRyYW5zZmVy');
-      if (!isTaxRelevant && !hasAddedEGLD) continue;
+      if (!isTaxRelevant && !hasAddedEGLD) {
+        console.log(`⚠️ Skipping tx ${tx.txHash}: function ${func} not tax-relevant, no EGLD transfer`);
+        continue;
+      }
 
       try {
         const detailed = await fetchWithRetry(
@@ -251,7 +292,7 @@ app.post('/fetch-transactions', async (req, res) => {
         if (['claimrewards', 'claimrewardsproxy'].includes(func)) {
           let hasAddedReward = false;
 
-          // Prøv operations først
+          // Prøv operations
           const tokenTransfersIn = operations.filter(op =>
             ['esdt', 'MetaESDT', 'fungibleESDT'].includes(op.type) &&
             op.receiver === walletAddress &&
@@ -289,7 +330,7 @@ app.post('/fetch-transactions', async (req, res) => {
             break;
           }
 
-          // Prøv logs hvis ingen operations
+          // Prøv logs
           if (!hasAddedReward) {
             const esdtEvents = logs.events.filter(event =>
               ['ESDTTransfer', 'ESDTNFTTransfer'].includes(event.identifier) &&
@@ -328,7 +369,7 @@ app.post('/fetch-transactions', async (req, res) => {
             }
           }
 
-          // Prøv results som siste utvei
+          // Prøv results
           if (!hasAddedReward) {
             const esdtResults = results.filter(r =>
               r.receiver === walletAddress &&
@@ -346,7 +387,7 @@ app.post('/fetch-transactions', async (req, res) => {
 
               const tokenHex = parts[1];
               const amountHex = parts[2];
-              const token = Buffer.from(tokenHex, 'hex').toString();
+              const token = decodeHexToString(tokenHex);
               if (!token) {
                 console.warn(`⚠️ Empty token in scResult for tx ${tx.txHash}`);
                 continue;
@@ -458,33 +499,18 @@ app.post('/fetch-transactions', async (req, res) => {
             }
           }
 
-          if (inCurrency !== 'UNKNOWN' || outCurrency !== 'UNKNOWN') {
-            taxRelevantTransactions.push({
-              timestamp: tx.timestamp,
-              function: func,
-              inAmount,
-              inCurrency,
-              outAmount,
-              outCurrency,
-              fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-              txHash: tx.txHash
-            });
-            console.log(`✅ Added swap tx ${tx.txHash}: ${inAmount} ${inCurrency} -> ${outAmount} ${outCurrency}`);
-            continue;
-          } else {
-            console.warn(`⚠️ No valid tokens for swap tx ${tx.txHash}, in=${JSON.stringify(tokenTransfersIn)}, out=${JSON.stringify(tokenTransfersOut)}`);
-            taxRelevantTransactions.push({
-              timestamp: tx.timestamp,
-              function: func,
-              inAmount: '0',
-              inCurrency: 'UNKNOWN',
-              outAmount: '0',
-              outCurrency: 'UNKNOWN',
-              fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-              txHash: tx.txHash
-            });
-            continue;
-          }
+          taxRelevantTransactions.push({
+            timestamp: tx.timestamp,
+            function: func,
+            inAmount,
+            inCurrency,
+            outAmount,
+            outCurrency,
+            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+            txHash: tx.txHash
+          });
+          console.log(`✅ Added swap tx ${tx.txHash}: ${inAmount} ${inCurrency} -> ${outAmount} ${outCurrency}`);
+          continue;
         }
 
         const tokenTransfersIn = operations.filter(op =>
@@ -500,7 +526,10 @@ app.post('/fetch-transactions', async (req, res) => {
 
         for (const op of tokenTransfersIn) {
           const token = op.identifier || 'UNKNOWN';
-          if (token === 'UNKNOWN') continue;
+          if (token === 'UNKNOWN') {
+            console.warn(`⚠️ Unknown token in operation for tx ${tx.txHash}:`, JSON.stringify(op));
+            continue;
+          }
 
           const amount = BigInt(op.value);
           const decimals = await getTokenDecimals(token);
@@ -520,7 +549,10 @@ app.post('/fetch-transactions', async (req, res) => {
 
         for (const op of tokenTransfersOut) {
           const token = op.identifier || 'UNKNOWN';
-          if (token === 'UNKNOWN') continue;
+          if (token === 'UNKNOWN') {
+            console.warn(`⚠️ Unknown token in operation for tx ${tx.txHash}:`, JSON.stringify(op));
+            continue;
+          }
 
           const amount = BigInt(op.value);
           const decimals = await getTokenDecimals(token);
