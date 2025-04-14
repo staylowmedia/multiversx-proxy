@@ -41,6 +41,9 @@ app.use(express.json());
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Helse-endepunkt for å holde Render våken
+app.get('/health', (req, res) => res.send('OK'));
+
 // SSE for fremdriftsoppdateringer
 app.get('/progress/:id', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -59,20 +62,30 @@ app.get('/progress/:id', (req, res) => {
     }
   });
 
+  // Send innledende melding
   reportProgress(id, '✅ SSE connection established');
 
+  // Send heartbeat hver 30. sekund for å holde forbindelsen i live
+  const heartbeat = setInterval(() => {
+    reportProgress(id, '💓 Heartbeat');
+  }, 30000);
+
+  // Timeout etter 10 minutter
   const timeout = setTimeout(() => {
     console.log(`📡 Timeout for clientId ${id}`);
     clientProgress.delete(id);
     res.end();
-  }, 300000); // 5 minutter
+  }, 600000);
 
   req.on('close', () => {
+    clearInterval(heartbeat);
     clearTimeout(timeout);
-    console.log(`📡 SSE connection closed for clientId: ${id}`);
+    console.log(`📡 SSE connection closed for clientId: ${id}, duration: ${(Date.now() - startTime) / 1000}s`);
     clientProgress.delete(id);
     res.end();
   });
+
+  const startTime = Date.now();
 });
 
 function reportProgress(clientId, message) {
