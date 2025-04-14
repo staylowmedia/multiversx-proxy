@@ -116,21 +116,51 @@ const decodeHexToBigInt = (hex) => {
 };
 
 function deduplicateTransactions(transactions) {
-  const seen = new Set();
+  const seen = new Map();
   const result = [];
 
   for (const tx of transactions) {
-    const normalizedFunc = (tx.function || '').toLowerCase();
-    const key = `${tx.txHash}:${normalizedFunc}:${tx.inAmount}:${tx.inCurrency}:${tx.outAmount}:${tx.outCurrency}`;
+    const key = `${tx.txHash}:${tx.function}`;
     if (!seen.has(key)) {
-      seen.add(key);
-      result.push({ ...tx, function: normalizedFunc });
+      seen.set(key, {
+        ...tx,
+        inAmounts: [],
+        outAmounts: []
+      });
+      result.push(seen.get(key));
     } else {
-      console.log(`⚠️ Duplikat hoppet over: ${key}`);
+      const existing = seen.get(key);
+      if (tx.inAmount !== '0' && !existing.inAmounts.some(a => a.amount === tx.inAmount && a.currency === tx.inCurrency)) {
+        if (existing.inAmount === '0' || BigNumber(tx.inAmount).gt(existing.inAmount)) {
+          existing.inAmount = tx.inAmount;
+          existing.inCurrency = tx.inCurrency;
+        }
+        existing.inAmounts.push({ amount: tx.inAmount, currency: tx.inCurrency });
+      }
+      if (tx.outAmount !== '0' && !existing.outAmounts.some(a => a.amount === tx.outAmount && a.currency === tx.outCurrency)) {
+        if (existing.outAmount === '0' || BigNumber(tx.outAmount).gt(existing.outAmount)) {
+          existing.outAmount = tx.outAmount;
+          existing.outCurrency = tx.outCurrency;
+        }
+        existing.outAmounts.push({ amount: tx.outAmount, currency: tx.outCurrency });
+      }
+      if (tx.fee !== '0' && existing.fee === '0') {
+        existing.fee = tx.fee;
+      }
+      console.log(`⚠️ Merged transaction: ${key}, in=${tx.inAmount} ${tx.inCurrency}, out=${tx.outAmount} ${tx.outCurrency}`);
     }
   }
 
-  return result;
+  return result.map(tx => ({
+    timestamp: tx.timestamp,
+    function: tx.function,
+    inAmount: tx.inAmount,
+    inCurrency: tx.inCurrency,
+    outAmount: tx.outAmount,
+    outCurrency: tx.outCurrency,
+    fee: tx.fee,
+    txHash: tx.txHash
+  }));
 }
 
 async function fetchWithRetry(url, params, retries = CONFIG.MAX_RETRIES, delayMs = CONFIG.BASE_DELAY_MS) {
@@ -530,6 +560,8 @@ app.post('/fetch-transactions', async (req, res) => {
             console.log(`✅ Added swap tx ${tx.txHash}: ${inAmount} ${inCurrency} -> ${outAmount} ${outCurrency}`);
             tokenTransfersIn = [];
             tokenTransfersOut = [];
+            logs.events = []; // Tøm logs for å unngå duplikater
+            results.length = 0; // Tøm results for å unngå duplikater
             continue;
           }
         }
@@ -611,7 +643,7 @@ app.post('/fetch-transactions', async (req, res) => {
             inCurrency: token,
             outAmount: '0',
             outCurrency: 'EGLD',
-            fee: esdtEvents.indexOf(event) === 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
+            fee: esdtEvents.indexOf(event) == 0 && !hasAddedEGLD ? (BigInt(tx.fee || 0) / BigInt(10**18)).toString() : '0',
             txHash: tx.txHash
           });
           console.log(`✅ Added token ${token} from logs for tx ${tx.txHash}: ${formatted}`);
