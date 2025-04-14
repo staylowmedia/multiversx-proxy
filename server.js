@@ -17,13 +17,8 @@ const CONFIG = {
   MAX_RETRIES: 5,
   BASE_DELAY_MS: 1000,
   CORS_ORIGINS: [
-    'https://www.multiversxdomain.com', // Din frontend-URL
-    'http://localhost:3000' // For lokal testing
-  ],
-  REWARD_TOKENS: [
-    'XMEX-fda355', 'MEX-455c57', 'UTK-2f80e9', 'ZPAY-247875', 'QWT-46ac01',
-    'RIDE-7d18e9', 'CRT-a28d59', 'CYBER-5d1f4a', 'AERO-458b36', 'ISET-83f339',
-    'BHAT-c1fde3', 'SFIT-dcbf2a', 'RARE-99e8b0'
+    'https://www.multiversxdomain.com',
+    'http://localhost:3000'
   ],
   TAX_RELEVANT_FUNCTIONS: [
     'claimrewards', 'claimrewardsproxy', 'swap_tokens_fixed_input', 'swap_tokens_fixed_output',
@@ -54,7 +49,7 @@ app.use(express.json());
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Helse-endepunkt for å holde Render våken
+// Helse-endepunkt
 app.get('/health', (req, res) => res.send('OK'));
 
 // SSE for fremdriftsoppdateringer
@@ -75,15 +70,12 @@ app.get('/progress/:id', (req, res) => {
     }
   });
 
-  // Send innledende melding
   reportProgress(id, '✅ SSE connection established');
 
-  // Send heartbeat hver 30. sekund for å holde forbindelsen i live
   const heartbeat = setInterval(() => {
     reportProgress(id, '💓 Heartbeat');
   }, 30000);
 
-  // Timeout etter 10 minutter
   const timeout = setTimeout(() => {
     console.log(`📡 Timeout for clientId ${id}`);
     clientProgress.delete(id);
@@ -202,10 +194,8 @@ app.post('/fetch-transactions', async (req, res) => {
   let taxRelevantTransactions = [];
 
   try {
-    // Valider konto
     await fetchWithRetry(`${CONFIG.API_BASE_URL}/accounts/${walletAddress}`, {});
 
-    // Hent transaksjoner
     reportProgress(clientId, '🔍 Henter transaksjoner...');
     for (let fromIndex = 0; fromIndex < 10000; fromIndex += CONFIG.PAGE_SIZE) {
       const params = {
@@ -222,7 +212,6 @@ app.post('/fetch-transactions', async (req, res) => {
       if (batch.length < CONFIG.PAGE_SIZE) break;
     }
 
-    // Behandle transaksjoner
     for (let i = 0; i < allTransactions.length; i++) {
       const tx = allTransactions[i];
       reportProgress(clientId, `🔍 Behandler ${i + 1} av ${allTransactions.length} transaksjoner...`);
@@ -230,7 +219,6 @@ app.post('/fetch-transactions', async (req, res) => {
       const func = (tx.function || '').toLowerCase();
       let hasAddedEGLD = false;
 
-      // Direkte EGLD-overføringer inn
       if (tx.receiver === walletAddress && tx.value && BigInt(tx.value) > 0 && func !== 'wrapegld') {
         const amount = BigInt(tx.value);
         const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed();
@@ -255,14 +243,15 @@ app.post('/fetch-transactions', async (req, res) => {
 
       try {
         const detailed = await fetchWithRetry(
-          `${CONFIG.API_BASE_URL}/transactions/${tx.txHash}?withOperations=true&withLogs=true`,
+          `${CONFIG.API_BASE_URL}/transactions/${tx.txHash}?withOperations=true&withLogs=true&withResults=true`,
           {}
         );
-        const { operations = [], logs = { events: [] } } = detailed.data;
+        const { operations = [], logs = { events: [] }, results = [] } = detailed.data;
 
-        // Håndter claimrewards og claimrewardsproxy
         if (['claimrewards', 'claimrewardsproxy'].includes(func)) {
           let hasAddedReward = false;
+
+          // Prøv operations først
           const tokenTransfersIn = operations.filter(op =>
             ['esdt', 'MetaESDT', 'fungibleESDT'].includes(op.type) &&
             op.receiver === walletAddress &&
@@ -271,9 +260,17 @@ app.post('/fetch-transactions', async (req, res) => {
 
           for (const op of tokenTransfersIn) {
             const token = op.identifier || 'UNKNOWN';
-            if (token === 'UNKNOWN' || !CONFIG.REWARD_TOKENS.includes(token)) continue;
+            if (token === 'UNKNOWN') {
+              console.warn(`⚠️ Unknown token in operations for tx ${tx.txHash}:`, JSON.stringify(op));
+              continue;
+            }
 
             const amount = BigInt(op.value);
+            if (amount <= BigInt(0)) {
+              console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+              continue;
+            }
+
             const decimals = await getTokenDecimals(token);
             const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
 
@@ -288,9 +285,11 @@ app.post('/fetch-transactions', async (req, res) => {
               txHash: tx.txHash
             });
             hasAddedReward = true;
+            console.log(`✅ Added reward token ${token} for tx ${tx.txHash}: ${formatted}`);
             break;
           }
 
+          // Prøv logs hvis ingen operations
           if (!hasAddedReward) {
             const esdtEvents = logs.events.filter(event =>
               ['ESDTTransfer', 'ESDTNFTTransfer'].includes(event.identifier) &&
@@ -299,10 +298,16 @@ app.post('/fetch-transactions', async (req, res) => {
 
             for (const event of esdtEvents) {
               const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
-              if (token === 'UNKNOWN' || !CONFIG.REWARD_TOKENS.includes(token)) continue;
+              if (token === 'UNKNOWN') {
+                console.warn(`⚠️ Unknown token in logs for tx ${tx.txHash}:`, JSON.stringify(event));
+                continue;
+              }
 
               const amount = decodeHexToBigInt(decodeBase64ToHex(event.topics?.[2] || '0'));
-              if (amount <= BigInt(0)) continue;
+              if (amount <= BigInt(0)) {
+                console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+                continue;
+              }
 
               const decimals = await getTokenDecimals(token);
               const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
@@ -318,11 +323,62 @@ app.post('/fetch-transactions', async (req, res) => {
                 txHash: tx.txHash
               });
               hasAddedReward = true;
+              console.log(`✅ Added reward token ${token} from logs for tx ${tx.txHash}: ${formatted}`);
+              break;
+            }
+          }
+
+          // Prøv results som siste utvei
+          if (!hasAddedReward) {
+            const esdtResults = results.filter(r =>
+              r.receiver === walletAddress &&
+              r.data &&
+              (r.data.startsWith('RVNEVFRyYW5zZmVy') || r.function === 'ESDTTransfer' || r.function === 'MultiESDTNFTTransfer')
+            );
+
+            for (const result of esdtResults) {
+              const decodedData = decodeBase64ToString(result.data);
+              const parts = decodedData.split('@');
+              if (parts.length < 3) {
+                console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+                continue;
+              }
+
+              const tokenHex = parts[1];
+              const amountHex = parts[2];
+              const token = Buffer.from(tokenHex, 'hex').toString();
+              if (!token) {
+                console.warn(`⚠️ Empty token in scResult for tx ${tx.txHash}`);
+                continue;
+              }
+
+              const amount = decodeHexToBigInt(amountHex);
+              if (amount <= BigInt(0)) {
+                console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+                continue;
+              }
+
+              const decimals = await getTokenDecimals(token);
+              const formatted = new BigNumber(amount.toString()).dividedBy(new BigNumber(10).pow(decimals)).toFixed();
+
+              taxRelevantTransactions.push({
+                timestamp: tx.timestamp,
+                function: func,
+                inAmount: formatted,
+                inCurrency: token,
+                outAmount: '0',
+                outCurrency: 'EGLD',
+                fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+                txHash: tx.txHash
+              });
+              hasAddedReward = true;
+              console.log(`✅ Added reward token ${token} from scResults for tx ${tx.txHash}: ${formatted}`);
               break;
             }
           }
 
           if (!hasAddedReward) {
+            console.warn(`⚠️ No valid reward token found for tx ${tx.txHash}, operations=${JSON.stringify(operations)}, logs=${JSON.stringify(logs.events)}, results=${JSON.stringify(results)}`);
             taxRelevantTransactions.push({
               timestamp: tx.timestamp,
               function: func,
@@ -337,7 +393,6 @@ app.post('/fetch-transactions', async (req, res) => {
           continue;
         }
 
-        // Håndter wrapEgld
         if (func === 'wrapegld' && tx.sender === walletAddress && tx.value && BigInt(tx.value) > 0) {
           const egldAmount = BigInt(tx.value);
           const egldFormatted = new BigNumber(egldAmount.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed();
@@ -364,7 +419,6 @@ app.post('/fetch-transactions', async (req, res) => {
           continue;
         }
 
-        // Håndter swaps
         if (['swap_tokens_fixed_input', 'swap_tokens_fixed_output', 'multipairswap'].includes(func)) {
           const tokenTransfersIn = operations.filter(op =>
             ['esdt', 'MetaESDT', 'fungibleESDT'].includes(op.type) &&
@@ -377,38 +431,55 @@ app.post('/fetch-transactions', async (req, res) => {
             BigInt(op.value || 0) > 0
           );
 
+          let inAmount = '0', inCurrency = 'UNKNOWN';
+          let outAmount = '0', outCurrency = 'UNKNOWN';
+
           if (tokenTransfersIn.length > 0) {
             const primaryIn = tokenTransfersIn.reduce((max, op) =>
               BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersIn[0]
             );
-            const inToken = primaryIn.identifier || 'UNKNOWN';
-            if (inToken === 'UNKNOWN') continue;
-
-            const inAmountBig = BigInt(primaryIn.value);
-            const inDecimals = await getTokenDecimals(inToken);
-            const inAmount = new BigNumber(inAmountBig.toString()).dividedBy(new BigNumber(10).pow(inDecimals)).toFixed();
-
-            let outAmount = '0', outCurrency = 'EGLD';
-            if (tokenTransfersOut.length > 0) {
-              const primaryOut = tokenTransfersOut.reduce((max, op) =>
-                BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersOut[0]
-              );
-              const outToken = primaryOut.identifier || 'UNKNOWN';
-              if (outToken !== 'UNKNOWN') {
-                const outAmountBig = BigInt(primaryOut.value);
-                const outDecimals = await getTokenDecimals(outToken);
-                outAmount = new BigNumber(outAmountBig.toString()).dividedBy(new BigNumber(10).pow(outDecimals)).toFixed();
-                outCurrency = outToken;
-              }
+            inCurrency = primaryIn.identifier || 'UNKNOWN';
+            if (inCurrency !== 'UNKNOWN') {
+              const inAmountBig = BigInt(primaryIn.value);
+              const inDecimals = await getTokenDecimals(inCurrency);
+              inAmount = new BigNumber(inAmountBig.toString()).dividedBy(new BigNumber(10).pow(inDecimals)).toFixed();
             }
+          }
 
+          if (tokenTransfersOut.length > 0) {
+            const primaryOut = tokenTransfersOut.reduce((max, op) =>
+              BigInt(op.value) > BigInt(max.value) ? op : max, tokenTransfersOut[0]
+            );
+            outCurrency = primaryOut.identifier || 'UNKNOWN';
+            if (outCurrency !== 'UNKNOWN') {
+              const outAmountBig = BigInt(primaryOut.value);
+              const outDecimals = await getTokenDecimals(outCurrency);
+              outAmount = new BigNumber(outAmountBig.toString()).dividedBy(new BigNumber(10).pow(outDecimals)).toFixed();
+            }
+          }
+
+          if (inCurrency !== 'UNKNOWN' || outCurrency !== 'UNKNOWN') {
             taxRelevantTransactions.push({
               timestamp: tx.timestamp,
               function: func,
               inAmount,
-              inCurrency: inToken,
+              inCurrency,
               outAmount,
               outCurrency,
+              fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+              txHash: tx.txHash
+            });
+            console.log(`✅ Added swap tx ${tx.txHash}: ${inAmount} ${inCurrency} -> ${outAmount} ${outCurrency}`);
+            continue;
+          } else {
+            console.warn(`⚠️ No valid tokens for swap tx ${tx.txHash}, in=${JSON.stringify(tokenTransfersIn)}, out=${JSON.stringify(tokenTransfersOut)}`);
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: func,
+              inAmount: '0',
+              inCurrency: 'UNKNOWN',
+              outAmount: '0',
+              outCurrency: 'UNKNOWN',
               fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
               txHash: tx.txHash
             });
@@ -416,7 +487,6 @@ app.post('/fetch-transactions', async (req, res) => {
           }
         }
 
-        // Generelle ESDT-overføringer
         const tokenTransfersIn = operations.filter(op =>
           ['esdt', 'MetaESDT', 'fungibleESDT'].includes(op.type) &&
           op.receiver === walletAddress &&
@@ -468,7 +538,6 @@ app.post('/fetch-transactions', async (req, res) => {
           });
         }
 
-        // Fallback for ingen overføringer
         if (!hasAddedEGLD && tokenTransfersIn.length === 0 && tokenTransfersOut.length === 0) {
           taxRelevantTransactions.push({
             timestamp: tx.timestamp,
