@@ -23,7 +23,7 @@ const CONFIG = {
   TAX_RELEVANT_FUNCTIONS: [
     'claimrewards', 'claimrewardsproxy', 'swap_tokens_fixed_input', 'swap_tokens_fixed_output',
     'multipairswap', 'transfer', 'esdttransfer', 'multiesdtnfttransfer', 'swap', 'send',
-    'receive', 'wrapegld', 'unwrapegld'
+    'receive', 'wrapegld', 'unwrapegld', 'aggregateesdt'
   ],
   KNOWN_TOKEN_DECIMALS: {
     'EGLD': 18,
