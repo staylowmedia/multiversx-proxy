@@ -200,14 +200,14 @@ app.post('/fetch-transactions', async (req, res) => {
   const { walletAddress, fromDate, toDate, clientId } = req.body;
 
   if (!walletAddress || !fromDate || !toDate || !clientId) {
-    reportProgress(clientId, '❌ Manglende parametere');
-    return res.status(400).json({ error: 'Manglende nødvendige parametere' });
+    reportProgress(clientId, '❌ Missing parameters');
+    return res.status(400).json({ error: 'Missing required parameters' });
   }
 
-  reportProgress(clientId, '📡 Validerer adresse...');
+  reportProgress(clientId, '📡 Validating address...');
   if (!validateWalletAddress(walletAddress)) {
-    reportProgress(clientId, '❌ Ugyldig adresse');
-    return res.status(400).json({ error: 'Ugyldig lommebokadresse' });
+    reportProgress(clientId, '❌ Invalid address');
+    return res.status(400).json({ error: 'Invalid wallet address' });
   }
 
   const fromDateObj = new Date(fromDate);
@@ -216,14 +216,14 @@ app.post('/fetch-transactions', async (req, res) => {
   const endTimestamp = Math.floor(toDateObj.getTime() / 1000);
 
   if (fromDateObj > toDateObj) {
-    reportProgress(clientId, '❌ Ugyldig datoperiode');
-    return res.status(400).json({ error: 'Ugyldig datoperiode' });
+    reportProgress(clientId, '❌ Invalid date range');
+    return res.status(400).json({ error: 'Invalid date range' });
   }
 
   const cacheKey = `${walletAddress}:${fromDate}:${toDate}`;
   const cached = cache.get(cacheKey);
   if (cached) {
-    reportProgress(clientId, '✅ Hentet fra cache');
+    reportProgress(clientId, '✅ Retrieved from cache');
     return res.json(cached);
   }
 
@@ -234,7 +234,7 @@ app.post('/fetch-transactions', async (req, res) => {
   try {
     await fetchWithRetry(`${CONFIG.API_BASE_URL}/accounts/${walletAddress}`, {});
 
-    reportProgress(clientId, '🔍 Henter transaksjoner...');
+    reportProgress(clientId, '🔍 Fetching transactions...');
     for (let fromIndex = 0; fromIndex < 10000; fromIndex += CONFIG.PAGE_SIZE) {
       const params = {
         after: startTimestamp,
@@ -246,13 +246,13 @@ app.post('/fetch-transactions', async (req, res) => {
       const response = await fetchWithRetry(`${CONFIG.API_BASE_URL}/accounts/${walletAddress}/transactions`, params);
       const batch = response.data;
       allTransactions.push(...batch);
-      reportProgress(clientId, `📦 Hentet ${allTransactions.length} transaksjoner...`);
+      reportProgress(clientId, `📦 Fetched ${allTransactions.length} transactions...`);
       if (batch.length < CONFIG.PAGE_SIZE) break;
     }
 
     for (let i = 0; i < allTransactions.length; i++) {
       const tx = allTransactions[i];
-      reportProgress(clientId, `🔍 Behandler ${i + 1} av ${allTransactions.length} transaksjoner...`);
+      reportProgress(clientId, `🔍 Processing ${i + 1} of ${allTransactions.length} transactions...`);
       const func = (tx.function || '').toLowerCase();
       uniqueFunctions.add(func);
       console.log(`Checking tx ${tx.txHash}: function=${func}, value=${tx.value}, receiver=${tx.receiver}, sender=${tx.sender}`);
@@ -364,7 +364,7 @@ app.post('/fetch-transactions', async (req, res) => {
               const token = op.identifier || op.name || 'UNKNOWN';
               console.log(`Fallback: Evaluating token ${token} (value=${op.value}, type=${op.type}, receiver=${op.receiver}) for tx ${tx.txHash}`);
               if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
-                console.warn(`⚷ Skipping LP or unknown token ${token} for ${func} tx ${tx.txHash}`);
+                console.warn(`⚠️ Skipping LP or unknown token ${token} for ${func} tx ${tx.txHash}`);
                 continue;
               }
               const amount = BigInt(op.value);
@@ -397,12 +397,12 @@ app.post('/fetch-transactions', async (req, res) => {
               const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
               console.log(`Logs: Evaluating token ${token} for tx ${tx.txHash}`);
               if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
-                console.warn(`⚷ Skipping LP or unknown token ${token} in logs for ${func} tx ${tx.txHash}`);
+                console.warn(`⚠️ Skipping LP or unknown token ${token} in logs for ${func} tx ${tx.txHash}`);
                 continue;
               }
               const amount = decodeHexToBigInt(decodeBase64ToHex(event.topics?.[2] || '0'));
-自身              if (amount <= BigInt(0)) {
-                console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+              if (amount <= BigInt(0)) {
+                console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
                 continue;
               }
               const decimals = await getTokenDecimals(token);
@@ -435,19 +435,19 @@ app.post('/fetch-transactions', async (req, res) => {
               const decodedData = decodeBase64ToString(result.data);
               const parts = decodedData.split('@');
               if (parts.length < 3) {
-                console.warn(`⚷ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+                console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
                 continue;
               }
               const tokenHex = parts[1];
               const amountHex = parts[2];
               const token = decodeHexToString(tokenHex);
               if (!token || lpTokenPattern.test(token)) {
-                console.warn(`⚷ Skipping empty or LP token ${token} in scResult for tx ${tx.txHash}`);
+                console.warn(`⚠️ Skipping empty or LP token ${token} in scResult for tx ${tx.txHash}`);
                 continue;
               }
               const amount = decodeHexToBigInt(amountHex);
               if (amount <= BigInt(0)) {
-                console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+                console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
                 continue;
               }
               const decimals = await getTokenDecimals(token);
@@ -469,7 +469,7 @@ app.post('/fetch-transactions', async (req, res) => {
           }
 
           if (!hasAddedReward) {
-            console.warn(`⚷ No valid reward token found for tx ${tx.txHash}, adding empty reward`);
+            console.warn(`⚠️ No valid reward token found for tx ${tx.txHash}, adding empty reward`);
             taxRelevantTransactions.push({
               timestamp: tx.timestamp,
               function: func,
@@ -563,12 +563,12 @@ app.post('/fetch-transactions', async (req, res) => {
         for (const op of tokenTransfersIn) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
-            console.warn(`⚷ Unknown token在使用操作 for tx ${tx.txHash}:`, JSON.stringify(op));
+            console.warn(`⚠️ Unknown token in operation for tx ${tx.txHash}:`, JSON.stringify(op));
             continue;
           }
           const amount = BigInt(op.value);
           if (amount <= BigInt(0)) {
-            console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+            console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
             continue;
           }
           const decimals = await getTokenDecimals(token);
@@ -589,12 +589,12 @@ app.post('/fetch-transactions', async (req, res) => {
         for (const op of tokenTransfersOut) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
-            console.warn(`⚷ Unknown token in operation for tx ${tx.txHash}:`, JSON.stringify(op));
+            console.warn(`⚠️ Unknown token in operation for tx ${tx.txHash}:`, JSON.stringify(op));
             continue;
           }
           const amount = BigInt(op.value);
           if (amount <= BigInt(0)) {
-            console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+            console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
             continue;
           }
           const decimals = await getTokenDecimals(token);
@@ -620,12 +620,12 @@ app.post('/fetch-transactions', async (req, res) => {
         for (const event of esdtEvents) {
           const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
           if (token === 'UNKNOWN') {
-            console.warn(`⚷ Skipping event with unknown token for tx ${tx.txHash}`);
+            console.warn(`⚠️ Skipping event with unknown token for tx ${tx.txHash}`);
             continue;
           }
           const amount = decodeHexToBigInt(decodeBase64ToHex(event.topics?.[2] || '0'));
           if (amount <= BigInt(0)) {
-            console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+            console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
             continue;
           }
           const decimals = await getTokenDecimals(token);
@@ -653,19 +653,19 @@ app.post('/fetch-transactions', async (req, res) => {
           const decodedData = decodeBase64ToString(result.data);
           const parts = decodedData.split('@');
           if (parts.length < 3) {
-            console.warn(`⚷ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+            console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
             continue;
           }
           const tokenHex = parts[1];
           const amountHex = parts[2];
           const token = decodeHexToString(tokenHex);
           if (!token) {
-            console.warn(`⚷ Empty token in scResult for tx ${tx.txHash}`);
+            console.warn(`⚠️ Empty token in scResult for tx ${tx.txHash}`);
             continue;
           }
           const amount = decodeHexToBigInt(amountHex);
           if (amount <= BigInt(0)) {
-            console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+            console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
             continue;
           }
           const decimals = await getTokenDecimals(token);
@@ -684,7 +684,7 @@ app.post('/fetch-transactions', async (req, res) => {
         }
 
         if (!hasAddedEGLD && egldTransfersIn.length === 0 && tokenTransfersIn.length === 0 && tokenTransfersOut.length === 0 && esdtEvents.length === 0 && esdtResults.length === 0) {
-          console.warn(`⚷ No transfers found for tx ${tx.txHash}, using fallback`);
+          console.warn(`⚠️ No transfers found for tx ${tx.txHash}, using fallback`);
           taxRelevantTransactions.push({
             timestamp: tx.timestamp,
             function: func || 'unknown',
@@ -697,30 +697,30 @@ app.post('/fetch-transactions', async (req, res) => {
           });
         }
       } catch (err) {
-        console.warn(`⚷ Kunne ikke hente detaljer for tx ${tx.txHash}:`, err.message);
+        console.warn(`⚠️ Could not fetch details for tx ${tx.txHash}:`, err.message);
       }
     }
 
     taxRelevantTransactions = deduplicateTransactions(taxRelevantTransactions);
-    console.log(`Unike funksjonsnavn:`, Array.from(uniqueFunctions));
+    console.log(`Unique function names:`, Array.from(uniqueFunctions));
 
     const result = { allTransactions, taxRelevantTransactions };
     if (taxRelevantTransactions.length === 0) {
-      reportProgress(clientId, '⚷ Ingen skatterelevante transaksjoner funnet');
+      reportProgress(clientId, '⚠️ No tax-relevant transactions found');
     } else {
-      reportProgress(clientId, `✅ Fullført med ${taxRelevantTransactions.length} skatterelevante transaksessionaler`);
+      reportProgress(clientId, `✅ Completed with ${taxRelevantTransactions.length} tax-relevant transactions`);
     }
 
     cache.set(cacheKey, result);
     res.json(result);
   } catch (error) {
-    console.error('❌ Feil i fetch-transactions:', error.message);
-    reportProgress(clientId, '❌ Mislyktes: ' + error.message);
-    res.status(500).json({ error: 'Kunne ikke hente transaksjoner. Prøv igjen senere.' });
+    console.error('❌ Error in fetch-transactions:', error.message);
+    reportProgress(clientId, '❌ Failed: ' + error.message);
+    res.status(500).json({ error: 'Could not fetch transactions. Please try again later.' });
   }
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 Proxy server kjører på port ${PORT}`);
+  console.log(`🚀 Proxy server running on port ${PORT}`);
 });
