@@ -17,8 +17,7 @@ const CONFIG = {
   MAX_RETRIES: 5,
   BASE_DELAY_MS: 1000,
   CORS_ORIGINS: [
-    'https://www.multiversxdomain.com',
-    'http://localhost:3000'
+    'https://www.multiversxdomain.com'
   ],
   TAX_RELEVANT_FUNCTIONS: [
     'claimrewards', 'claimrewardsproxy', 'swap_tokens_fixed_input', 'swap_tokens_fixed_output',
@@ -222,7 +221,6 @@ app.post('/fetch-transactions', async (req, res) => {
   }
 
   const cacheKey = `${walletAddress}:${fromDate}:${toDate}`;
-  cache.del(cacheKey); // Fjern cache for testing
   const cached = cache.get(cacheKey);
   if (cached) {
     reportProgress(clientId, '✅ Hentet fra cache');
@@ -293,10 +291,6 @@ app.post('/fetch-transactions', async (req, res) => {
           {}
         );
         const { operations = [], logs = { events: [] }, results = [] } = detailed.data;
-
-        if (['b13e89d95cfd7c4d3db8920a3fd9daf299d98dcdfbcc51ed2194a5d136bb6b1f'].includes(tx.txHash)) {
-          console.log(`Full response for tx ${tx.txHash}:`, JSON.stringify(detailed.data, null, 2));
-        }
 
         let egldTransfersIn = operations.filter(op =>
           op.type === 'egld' &&
@@ -370,7 +364,7 @@ app.post('/fetch-transactions', async (req, res) => {
               const token = op.identifier || op.name || 'UNKNOWN';
               console.log(`Fallback: Evaluating token ${token} (value=${op.value}, type=${op.type}, receiver=${op.receiver}) for tx ${tx.txHash}`);
               if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
-                console.warn(`⚠️ Skipping LP or unknown token ${token} for ${func} tx ${tx.txHash}`);
+                console.warn(`⚷ Skipping LP or unknown token ${token} for ${func} tx ${tx.txHash}`);
                 continue;
               }
               const amount = BigInt(op.value);
@@ -403,12 +397,12 @@ app.post('/fetch-transactions', async (req, res) => {
               const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
               console.log(`Logs: Evaluating token ${token} for tx ${tx.txHash}`);
               if (token === 'UNKNOWN' || lpTokenPattern.test(token)) {
-                console.warn(`⚠️ Skipping LP or unknown token ${token} in logs for ${func} tx ${tx.txHash}`);
+                console.warn(`⚷ Skipping LP or unknown token ${token} in logs for ${func} tx ${tx.txHash}`);
                 continue;
               }
               const amount = decodeHexToBigInt(decodeBase64ToHex(event.topics?.[2] || '0'));
-              if (amount <= BigInt(0)) {
-                console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+自身              if (amount <= BigInt(0)) {
+                console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
                 continue;
               }
               const decimals = await getTokenDecimals(token);
@@ -441,19 +435,19 @@ app.post('/fetch-transactions', async (req, res) => {
               const decodedData = decodeBase64ToString(result.data);
               const parts = decodedData.split('@');
               if (parts.length < 3) {
-                console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+                console.warn(`⚷ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
                 continue;
               }
               const tokenHex = parts[1];
               const amountHex = parts[2];
               const token = decodeHexToString(tokenHex);
               if (!token || lpTokenPattern.test(token)) {
-                console.warn(`⚠️ Skipping empty or LP token ${token} in scResult for tx ${tx.txHash}`);
+                console.warn(`⚷ Skipping empty or LP token ${token} in scResult for tx ${tx.txHash}`);
                 continue;
               }
               const amount = decodeHexToBigInt(amountHex);
               if (amount <= BigInt(0)) {
-                console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+                console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
                 continue;
               }
               const decimals = await getTokenDecimals(token);
@@ -475,7 +469,7 @@ app.post('/fetch-transactions', async (req, res) => {
           }
 
           if (!hasAddedReward) {
-            console.warn(`⚠️ No valid reward token found for tx ${tx.txHash}, adding empty reward`);
+            console.warn(`⚷ No valid reward token found for tx ${tx.txHash}, adding empty reward`);
             taxRelevantTransactions.push({
               timestamp: tx.timestamp,
               function: func,
@@ -569,12 +563,12 @@ app.post('/fetch-transactions', async (req, res) => {
         for (const op of tokenTransfersIn) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
-            console.warn(`⚠️ Unknown token in operation for tx ${tx.txHash}:`, JSON.stringify(op));
+            console.warn(`⚷ Unknown token在使用操作 for tx ${tx.txHash}:`, JSON.stringify(op));
             continue;
           }
           const amount = BigInt(op.value);
           if (amount <= BigInt(0)) {
-            console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+            console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
             continue;
           }
           const decimals = await getTokenDecimals(token);
@@ -595,12 +589,12 @@ app.post('/fetch-transactions', async (req, res) => {
         for (const op of tokenTransfersOut) {
           const token = op.identifier || op.name || 'UNKNOWN';
           if (token === 'UNKNOWN') {
-            console.warn(`⚠️ Unknown token in operation for tx ${tx.txHash}:`, JSON.stringify(op));
+            console.warn(`⚷ Unknown token in operation for tx ${tx.txHash}:`, JSON.stringify(op));
             continue;
           }
           const amount = BigInt(op.value);
           if (amount <= BigInt(0)) {
-            console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+            console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
             continue;
           }
           const decimals = await getTokenDecimals(token);
@@ -626,12 +620,12 @@ app.post('/fetch-transactions', async (req, res) => {
         for (const event of esdtEvents) {
           const token = decodeBase64ToString(event.topics?.[0] || '') || 'UNKNOWN';
           if (token === 'UNKNOWN') {
-            console.warn(`⚠️ Skipping event with unknown token for tx ${tx.txHash}`);
+            console.warn(`⚷ Skipping event with unknown token for tx ${tx.txHash}`);
             continue;
           }
           const amount = decodeHexToBigInt(decodeBase64ToHex(event.topics?.[2] || '0'));
           if (amount <= BigInt(0)) {
-            console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+            console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
             continue;
           }
           const decimals = await getTokenDecimals(token);
@@ -659,19 +653,19 @@ app.post('/fetch-transactions', async (req, res) => {
           const decodedData = decodeBase64ToString(result.data);
           const parts = decodedData.split('@');
           if (parts.length < 3) {
-            console.warn(`⚠️ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
+            console.warn(`⚷ Invalid ESDTTransfer data for tx ${tx.txHash}:`, decodedData);
             continue;
           }
           const tokenHex = parts[1];
           const amountHex = parts[2];
           const token = decodeHexToString(tokenHex);
           if (!token) {
-            console.warn(`⚠️ Empty token in scResult for tx ${tx.txHash}`);
+            console.warn(`⚷ Empty token in scResult for tx ${tx.txHash}`);
             continue;
           }
           const amount = decodeHexToBigInt(amountHex);
           if (amount <= BigInt(0)) {
-            console.warn(`⚠️ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
+            console.warn(`⚷ Zero or negative amount for token ${token} in tx ${tx.txHash}`);
             continue;
           }
           const decimals = await getTokenDecimals(token);
@@ -690,7 +684,7 @@ app.post('/fetch-transactions', async (req, res) => {
         }
 
         if (!hasAddedEGLD && egldTransfersIn.length === 0 && tokenTransfersIn.length === 0 && tokenTransfersOut.length === 0 && esdtEvents.length === 0 && esdtResults.length === 0) {
-          console.warn(`⚠️ No transfers found for tx ${tx.txHash}, using fallback`);
+          console.warn(`⚷ No transfers found for tx ${tx.txHash}, using fallback`);
           taxRelevantTransactions.push({
             timestamp: tx.timestamp,
             function: func || 'unknown',
@@ -703,7 +697,7 @@ app.post('/fetch-transactions', async (req, res) => {
           });
         }
       } catch (err) {
-        console.warn(`⚠️ Kunne ikke hente detaljer for tx ${tx.txHash}:`, err.message);
+        console.warn(`⚷ Kunne ikke hente detaljer for tx ${tx.txHash}:`, err.message);
       }
     }
 
@@ -712,9 +706,9 @@ app.post('/fetch-transactions', async (req, res) => {
 
     const result = { allTransactions, taxRelevantTransactions };
     if (taxRelevantTransactions.length === 0) {
-      reportProgress(clientId, '⚠️ Ingen skatterelevante transaksjoner funnet');
+      reportProgress(clientId, '⚷ Ingen skatterelevante transaksjoner funnet');
     } else {
-      reportProgress(clientId, `✅ Fullført med ${taxRelevantTransactions.length} skatterelevante transaksjoner`);
+      reportProgress(clientId, `✅ Fullført med ${taxRelevantTransactions.length} skatterelevante transaksessionaler`);
     }
 
     cache.set(cacheKey, result);
