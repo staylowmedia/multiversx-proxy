@@ -22,7 +22,7 @@ const CONFIG = {
   TAX_RELEVANT_FUNCTIONS: [
     'claimrewards', 'claimrewardsproxy', 'swap_tokens_fixed_input', 'swap_tokens_fixed_output',
     'multipairswap', 'transfer', 'esdttransfer', 'multiesdtnfttransfer', 'swap', 'send',
-    'receive', 'wrapegld', 'unwrapegld'
+    'receive', 'wrapegld', 'unwrapegld', 'aggregateEgld' // Lagt til
   ],
   KNOWN_TOKEN_DECIMALS: {
     'EGLD': 18,
@@ -119,7 +119,7 @@ function deduplicateTransactions(transactions) {
   const result = [];
 
   for (const tx of transactions) {
-    const key = `${tx.txHash}:${tx.function}`;
+    const key = `${tx.txHash}:${tx.function}:${tx.inCurrency}:${tx.outCurrency}`; // Forbedret deduplisering
     if (!seen.has(key)) {
       seen.set(key, {
         ...tx,
@@ -255,7 +255,11 @@ app.post('/fetch-transactions', async (req, res) => {
       reportProgress(clientId, `🔍 Processing ${i + 1} of ${allTransactions.length} transactions...`);
       const func = (tx.function || '').toLowerCase();
       uniqueFunctions.add(func);
-      console.log(`Checking tx ${tx.txHash}: function=${func}, value=${tx.value}, receiver=${tx.receiver}, sender=${tx.sender}`);
+      console.log(`🔍 Raw tx ${tx.txHash}: function=${tx.function}, value=${tx.value}, receiver=${tx.receiver}, action=${JSON.stringify(tx.action)}, data=${tx.data}`);
+
+      if (func === 'aggregateEgld') {
+        console.log(`🔍 aggregateEgld tx ${tx.txHash}: value=${tx.value}, receiver=${tx.receiver}`);
+      }
 
       let hasAddedEGLD = false;
 
@@ -292,6 +296,10 @@ app.post('/fetch-transactions', async (req, res) => {
         );
         const { operations = [], logs = { events: [] }, results = [] } = detailed.data;
 
+        if (func === 'aggregateEgld') {
+          console.log(`🔍 Details for aggregateEgld tx ${tx.txHash}: operations=${JSON.stringify(operations)}, events=${JSON.stringify(logs.events)}, results=${JSON.stringify(results)}`);
+        }
+
         let egldTransfersIn = operations.filter(op =>
           op.type === 'egld' &&
           op.receiver === walletAddress &&
@@ -323,6 +331,23 @@ app.post('/fetch-transactions', async (req, res) => {
             txHash: tx.txHash
           });
           hasAddedEGLD = true;
+        }
+
+        if (func === 'aggregateEgld' && tx.sender === walletAddress && tx.value && BigInt(tx.value) > 0) {
+          console.log(`Processing aggregateEgld for tx ${tx.txHash}: EGLD out=${tx.value}`);
+          const egldAmount = BigInt(tx.value);
+          const egldFormatted = new BigNumber(egldAmount.toString()).dividedBy(new BigNumber(10).pow(18)).toFixed();
+          taxRelevantTransactions.push({
+            timestamp: tx.timestamp,
+            function: func,
+            inAmount: '0',
+            inCurrency: 'EGLD',
+            outAmount: egldFormatted,
+            outCurrency: 'EGLD',
+            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+            txHash: tx.txHash
+          });
+          continue;
         }
 
         if (['claimrewards', 'claimrewardsproxy'].includes(func)) {
@@ -554,8 +579,8 @@ app.post('/fetch-transactions', async (req, res) => {
             console.log(`✅ Added swap tx ${tx.txHash}: ${inAmount} ${inCurrency} -> ${outAmount} ${outCurrency}`);
             tokenTransfersIn = [];
             tokenTransfersOut = [];
-            logs.events = []; // Tøm logs for å unngå duplikater
-            results.length = 0; // Tøm results for å unngå duplikater
+            logs.events = [];
+            results.length = 0;
             continue;
           }
         }
@@ -684,17 +709,19 @@ app.post('/fetch-transactions', async (req, res) => {
         }
 
         if (!hasAddedEGLD && egldTransfersIn.length === 0 && tokenTransfersIn.length === 0 && tokenTransfersOut.length === 0 && esdtEvents.length === 0 && esdtResults.length === 0) {
-          console.warn(`⚠️ No transfers found for tx ${tx.txHash}, using fallback`);
-          taxRelevantTransactions.push({
-            timestamp: tx.timestamp,
-            function: func || 'unknown',
-            inAmount: '0',
-            inCurrency: 'EGLD',
-            outAmount: '0',
-            outCurrency: 'EGLD',
-            fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
-            txHash: tx.txHash
-          });
+          console.warn(`⚠️ No transfers found for tx ${tx.txHash}: function=${func}, operations=${JSON.stringify(operations)}, events=${JSON.stringify(logs.events)}, results=${JSON.stringify(results)}`);
+          if (func !== 'aggregateEgld') {
+            taxRelevantTransactions.push({
+              timestamp: tx.timestamp,
+              function: func || 'unknown',
+              inAmount: '0',
+              inCurrency: 'EGLD',
+              outAmount: '0',
+              outCurrency: 'EGLD',
+              fee: (BigInt(tx.fee || 0) / BigInt(10**18)).toString(),
+              txHash: tx.txHash
+            });
+          }
         }
       } catch (err) {
         console.warn(`⚠️ Could not fetch details for tx ${tx.txHash}:`, err.message);
